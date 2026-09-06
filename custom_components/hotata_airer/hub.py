@@ -25,8 +25,12 @@ from typing import Any, Callable
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import httpx_client
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import (
+    async_track_point_in_time,
+    async_track_time_interval,
+)
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
 from .const import (
     API_INVOKE2,
@@ -49,13 +53,22 @@ from .const import (
     DEFAULT_NAME,
     DOMAIN,
     IMEI,
+    ONLINE_CHECK_INTERVAL,
     PHONE_MODEL,
-    POLL_INTERVAL,
+    POLL_ACTIVE_WINDOW,
+    POLL_INTERVAL_FAST,
+    POLL_INTERVAL_SLOW,
+    RATE_LIMIT_BACKOFF,
     SYS_VERSION,
 )
 from .util import build_login_body, encrypt_password, generate_sign
 
 _LOGGER = logging.getLogger(__name__)
+
+# Runtime issue keys surfaced to the user (persistent notification +
+# error-state sensor). Cloud-recoverable ones are cleared on success.
+ISSUE_RATE_LIMITED = "rate_limited"
+ISSUE_CONNECTION = "connection_error"
 
 
 def build_base_payload(
@@ -131,9 +144,18 @@ class HotataAccount:
 
         self._token_expired: bool = False
         self._token_permanently_invalid: bool = False  # True when 1073 received
-        self._last_error: str = ""  # Human-readable error description
+        # Machine-readable error key ("normal"/"auth_expired"/"too_many_requests"/
+        # "server_error") matched by translations; raw text kept in detail.
+        self._last_error: str = ""
+        self._last_error_detail: str = ""
         self._refresh_in_progress: bool = False
         self._last_refresh_attempt: float = 0
+        # Cloud health tracking: active user-visible issues (key -> detail) and
+        # consecutive request failures for the connection-loss alert.
+        self._active_issues: dict[str, str] = {}
+        self._conn_failure_count: int = 0
+        # Account-wide 403 silence deadline (epoch); all cloud requests stop.
+        self._rate_limited_until: float = 0.0
         self._unsub_token_refresh: Callable[[], None] | None = None
         # iot_id -> HotataHub, populated by async_setup_entry
         self.device_hubs: dict[str, HotataHub] = {}
@@ -165,8 +187,103 @@ class HotataAccount:
 
     @property
     def last_error(self) -> str:
-        """Return the last error message."""
+        """Return the machine-readable error key (translated by HA)."""
         return self._last_error
+
+    @property
+    def last_error_detail(self) -> str:
+        """Return the raw server error text for diagnostics."""
+        return self._last_error_detail
+
+    @property
+    def active_issues(self) -> dict[str, str]:
+        """Return the currently active user-visible issues (key -> detail)."""
+        return dict(self._active_issues)
+
+    @property
+    def rate_limited(self) -> bool:
+        """True while the account is in the 403 silence window."""
+        return time.time() < self._rate_limited_until
+
+    # ---- cloud health issues (403 rate limit / connection loss) ----
+
+    def _issue_notification_id(self, key: str) -> str:
+        return f"hotata_issue_{self.entry.entry_id}_{key}"
+
+    def _async_report_issue(self, key: str, title: str, message: str) -> None:
+        """Raise a user-visible issue once, with a persistent notification."""
+        if self._active_issues.get(key) == message:
+            return
+        self._active_issues[key] = message
+        self.hass.components.persistent_notification.async_create(
+            message=message,
+            title=title,
+            notification_id=self._issue_notification_id(key),
+        )
+        self._async_push_issue_state()
+
+    def _async_clear_issue(self, key: str) -> bool:
+        """Clear an active issue; return True if it was active."""
+        if key not in self._active_issues:
+            return False
+        del self._active_issues[key]
+        self.hass.components.persistent_notification.async_dismiss(
+            self._issue_notification_id(key)
+        )
+        return True
+
+    def _async_push_issue_state(self) -> None:
+        """Refresh entities so the error-state sensor reflects new issues."""
+        for hub in self.device_hubs.values():
+            self.hass.async_create_task(hub.notify_listeners())
+
+    def report_rate_limited(self, detail: str = "") -> None:
+        """User-visible warning while the server throttles us (403).
+
+        Enters an account-wide 24h silence: polling, token refresh and control
+        commands all stop, because any request during the penalty may extend it.
+        """
+        self._rate_limited_until = time.time() + RATE_LIMIT_BACKOFF
+        self._async_report_issue(
+            ISSUE_RATE_LIMITED,
+            "好太太云端限频（403 操作过于频繁）",
+            "好太太云端返回「操作过于频繁」，集成已停止全部云端请求 24 小时"
+            "（轮询、控制命令、token 刷新均暂停），以避免处罚延长。\n\n"
+            "期间晾衣机实体将显示为不可用，属正常现象；24 小时后自动恢复，"
+            "恢复时会再发一条通知，无需任何操作。"
+            + (f"\n\n设备：{detail}" if detail else ""),
+        )
+
+    def note_cloud_failure(self, err: Exception) -> None:
+        """Count a failed cloud request; alert after repeated failures."""
+        self._conn_failure_count += 1
+        if self._conn_failure_count < 2 or ISSUE_CONNECTION in self._active_issues:
+            return
+        self._async_report_issue(
+            ISSUE_CONNECTION,
+            "好太太云端连接失败",
+            f"连续 {self._conn_failure_count} 次云端请求失败"
+            f"（{type(err).__name__}: {err or '连接/响应超时'}）。\n\n"
+            "常见原因：本机断网、DNS/代理故障或好太太服务端不可用。"
+            "集成会按退避节奏自动重试，恢复后会发送通知。",
+        )
+
+    def note_cloud_success(self) -> None:
+        """A cloud request succeeded — reset failure count, clear issues."""
+        self._conn_failure_count = 0
+        self._rate_limited_until = 0.0
+        cleared = [
+            key
+            for key in (ISSUE_RATE_LIMITED, ISSUE_CONNECTION)
+            if self._async_clear_issue(key)
+        ]
+        if cleared:
+            self.hass.components.persistent_notification.async_create(
+                message="好太太云端连接已恢复正常，轮询已继续。",
+                title="好太太云端已恢复",
+                notification_id=self._issue_notification_id("recovery"),
+            )
+            self._async_push_issue_state()
 
     def register_device(self, hub: HotataHub) -> None:
         """Register a device hub so it can be notified on token changes."""
@@ -183,6 +300,14 @@ class HotataAccount:
 
     async def ensure_token_valid(self) -> bool:
         """Check if token is valid, refresh if needed."""
+        # Account-wide 403 silence: no requests at all until the deadline.
+        if self._rate_limited_until > time.time():
+            _LOGGER.debug(
+                "Rate limited, skipping token check for another %.0fs",
+                self._rate_limited_until - time.time(),
+            )
+            return False
+
         # Token permanently invalid (1073) — stop retrying
         if self._token_permanently_invalid:
             return False
@@ -213,6 +338,11 @@ class HotataAccount:
 
     async def async_refresh_token(self) -> bool:
         """Refresh the access token for the whole account."""
+        # Account-wide 403 silence: skip refresh entirely (scheduled ticks too).
+        if self._rate_limited_until > time.time():
+            _LOGGER.debug("Rate limited, skipping token refresh")
+            return False
+
         # Prevent concurrent refresh
         if self._refresh_in_progress:
             _LOGGER.debug("Token refresh already in progress, waiting")
@@ -278,6 +408,8 @@ class HotataAccount:
                     self._token_permanently_invalid = False
                     self._token_expiry_notified = False
                     self._last_error = ""
+                    self._last_error_detail = ""
+                    self.note_cloud_success()
                     _LOGGER.info("Token refreshed successfully")
                     return True
                 else:
@@ -292,16 +424,30 @@ class HotataAccount:
                         if await self.async_login():
                             return True
                         self._token_permanently_invalid = True
+                        self._last_error = "auth_expired"
+                        self._last_error_detail = msg or "登录已过期，请重新登录"
                         await self._notify_token_expired()
                     elif code == "403":
-                        self._last_error = "Too many requests, waiting for cooldown"
+                        self._last_error = "too_many_requests"
+                        self._last_error_detail = (
+                            "Too many requests, waiting for cooldown"
+                        )
+                        self.report_rate_limited()
                     else:
-                        self._last_error = f"Token refresh failed: code={code}, msg={msg}"
+                        self._last_error = "server_error"
+                        self._last_error_detail = (
+                            f"Token refresh failed: code={code}, msg={msg}"
+                        )
                     _LOGGER.warning("Token refresh failed: %s", data)
                     self._token_expired = True
                     return False
         except Exception as err:
-            _LOGGER.warning("Token refresh error: %s", err)
+            # str(err) is empty for bare timeouts, so always include the type.
+            _LOGGER.warning(
+                "Token refresh error: %s: %s", type(err).__name__, err,
+                exc_info=True,
+            )
+            self.note_cloud_failure(err)
             self._token_expired = True
             return False
         finally:
@@ -328,6 +474,11 @@ class HotataAccount:
                 data = resp.json()
                 if data.get("code") != "000":
                     _LOGGER.error("Login failed: code=%s, msg=%s", data.get("code"), data.get("message"))
+                    self._last_error = "auth_expired"
+                    self._last_error_detail = (
+                        f"Login failed: code={data.get('code')}, "
+                        f"msg={data.get('message')}"
+                    )
                     return False
                 d = data.get("data", {})
                 token_type = d.get("tokenType", "bearer").strip()
@@ -342,10 +493,13 @@ class HotataAccount:
                 self._token_permanently_invalid = False
                 self._token_expiry_notified = False
                 self._last_error = ""
+                self._last_error_detail = ""
                 _LOGGER.info("Login successful, tokens updated")
                 return True
         except Exception as err:
-            _LOGGER.warning("Login error: %s", err)
+            _LOGGER.warning(
+                "Login error: %s: %s", type(err).__name__, err, exc_info=True
+            )
             return False
 
     async def _check_new_devices(self) -> None:
@@ -361,7 +515,7 @@ class HotataAccount:
         if not await self.ensure_token_valid():
             return
         try:
-            from .config_flow import _get_device_list, _merge_devices
+            from .config_flow import _device_metadata, _get_device_list, _merge_devices
             fetched = await _get_device_list(
                 self.hass, self._access_token, self.user_id,
             )
@@ -370,8 +524,17 @@ class HotataAccount:
             return
         if not fetched:
             return
+        # Normalize fetched records the same way the config flow does so new
+        # devices carry descent_time / product / mac metadata consistently.
+        # New devices fall back to the default descent time; the user can tune
+        # each one via the number entity afterwards.
+        standardized = [
+            _device_metadata(d, DEFAULT_DESCENT_TIME)
+            for d in fetched
+            if (d.get("iotid") or d.get("iotId"))
+        ]
         existing = self.entry.data.get("devices", [])
-        merged = _merge_devices(existing, fetched)
+        merged = _merge_devices(existing, standardized)
         new_devices = [d for d in merged if d not in existing]
         if not new_devices:
             return
@@ -483,6 +646,9 @@ class HotataHub:
         self._refresh_in_progress: bool = False
         self._last_refresh_attempt: float = 0
         self._last_state_hash: str = ""
+        # Dynamic polling: fast while active (motor moving / recent command).
+        self._active_until: float = 0.0
+        self._last_online_check: float = 0.0
 
         self._descent_time: int = int(
             device_data.get(CONF_DESCENT_TIME, DEFAULT_DESCENT_TIME)
@@ -517,6 +683,11 @@ class HotataHub:
     def last_error(self) -> str:
         """Return the last error message (from the shared account)."""
         return self.account.last_error
+
+    @property
+    def last_error_detail(self) -> str:
+        """Return the raw error detail (from the shared account)."""
+        return self.account.last_error_detail
 
     @property
     def user_id(self) -> str:
@@ -644,12 +815,15 @@ class HotataHub:
 
                 if data.get("code") == "000":
                     self.account._token_expired = False
+                    self.account.note_cloud_success()
                     _LOGGER.debug("Property get raw data: %s", str(data)[:500])
                     self._parse_state(data)
                     return self.state
-                else:
-                    _LOGGER.warning("Query failed: %s", data)
+                if data.get("code") == "403":
+                    self._report_rate_limited()
                     return None
+                _LOGGER.warning("Query failed: %s", data)
+                return None
             except httpx.HTTPStatusError as err:
                 if err.response.status_code == 401:
                     _LOGGER.warning("Got HTTP 401, attempting token refresh")
@@ -666,16 +840,21 @@ class HotataHub:
                         data = resp.json()
                         if data.get("code") == "000":
                             self.account._token_expired = False
+                            self.account.note_cloud_success()
                             _LOGGER.debug(
                                 "Property get raw data (retry): %s", str(data)[:500]
                             )
                             self._parse_state(data)
                             return self.state
-                    return None
+                        if data.get("code") == "403":
+                            self._report_rate_limited()
+                        return None
                 _LOGGER.error("HTTP error querying device: %s", err)
+                self.account.note_cloud_failure(err)
                 return None
             except Exception as err:
                 _LOGGER.error("Query error (not auth-related): %s", err)
+                self.account.note_cloud_failure(err)
                 return None
 
     def _state_hash(self) -> str:
@@ -788,6 +967,9 @@ class HotataHub:
 
     async def async_update(self) -> None:
         """Poll device state and notify listeners only on change."""
+        if self.account.rate_limited:
+            _LOGGER.debug("Rate limited, skipping poll entirely")
+            return
         await self._check_online_status()
         state = await self._query_properties()
         if state is not None:
@@ -800,7 +982,10 @@ class HotataHub:
             await self._notify_listeners()
 
     async def _check_online_status(self) -> None:
-        """Query device online status from API."""
+        """Query device online status from API (throttled)."""
+        if time.time() - self._last_online_check < ONLINE_CHECK_INTERVAL:
+            return
+        self._last_online_check = time.time()
         if not await self._ensure_token_valid():
             return
 
@@ -818,12 +1003,16 @@ class HotataHub:
                 data = resp.json()
 
                 if data.get("code") == "000":
+                    self.account.note_cloud_success()
                     online = data.get("data", {}).get("onlineStatus", False)
                     if online != self.state.online:
                         self.state.online = online
                         _LOGGER.info("Device online status changed to: %s", online)
+                elif data.get("code") == "403":
+                    self._report_rate_limited()
             except Exception as err:
                 _LOGGER.error("Online status check error: %s", err)
+                self.account.note_cloud_failure(err)
 
     # ---- Control commands ----
 
@@ -856,6 +1045,7 @@ class HotataHub:
         if not await self._ensure_token_valid():
             return False
 
+        self._bump_active_window()
         payload = build_base_payload(self.user_id, self.iot_id)
         payload["paramJson"] = json.dumps(properties)
         payload["sign"] = generate_sign(payload)
@@ -867,6 +1057,7 @@ class HotataHub:
         if not await self._ensure_token_valid():
             return False
 
+        self._bump_active_window()
         payload = build_base_payload(self.user_id, self.iot_id)
         payload["serviceName"] = service_name
         payload["paramJson"] = json.dumps(params)
@@ -888,6 +1079,7 @@ class HotataHub:
 
                 if data.get("code") == "000":
                     _LOGGER.debug("API success on %s... (code=000)", url[-30:])
+                    self.account.note_cloud_success()
                     return True
 
                 if data.get("code") == "401":
@@ -913,23 +1105,51 @@ class HotataHub:
                     _LOGGER.error("Token refresh failed, control command aborted")
                     return False
 
+                if data.get("code") == "403":
+                    self._report_rate_limited()
+                    return False
+
                 _LOGGER.warning("API error on %s...: %s", url[-30:], data)
                 return False
             except Exception as err:
                 _LOGGER.error("API request error on %s...: %s", url[-30:], err)
+                self.account.note_cloud_failure(err)
                 return False
 
     # ---- Polling management (state only; token refresh lives on account) ----
 
+    def _report_rate_limited(self) -> None:
+        """Server 403 — the account enters its 24h silence window."""
+        _LOGGER.warning(
+            "Server returned 403 (too many requests) for %s; account-wide "
+            "silence for %ds",
+            self.name,
+            RATE_LIMIT_BACKOFF,
+        )
+        self.account.report_rate_limited(self.name)
+
+    def _bump_active_window(self) -> None:
+        """Keep polling at the fast rate for a while after a control command."""
+        self._active_until = time.time() + POLL_ACTIVE_WINDOW
+
     async def start_polling(self) -> None:
-        """Start periodic state polling for this device."""
-        _LOGGER.info("Starting device polling (interval=%ds)", POLL_INTERVAL)
+        """Start dynamic-interval polling (fast while active, slow when idle)."""
+        _LOGGER.info(
+            "Starting device polling (idle=%ds, active=%ds)",
+            POLL_INTERVAL_SLOW,
+            POLL_INTERVAL_FAST,
+        )
 
         # Immediate first update
         await self.async_update()
+        self._schedule_next_poll(POLL_INTERVAL_SLOW)
 
-        self._unsub_poll = async_track_time_interval(
-            self.hass, self._poll_callback, timedelta(seconds=POLL_INTERVAL)
+    def _schedule_next_poll(self, delay: float) -> None:
+        """Schedule the next poll at a dynamic interval."""
+        self._unsub_poll = async_track_point_in_time(
+            self.hass,
+            self._poll_callback,
+            dt_util.utcnow() + timedelta(seconds=delay),
         )
 
     def stop_polling(self) -> None:
@@ -938,12 +1158,16 @@ class HotataHub:
             self._unsub_poll()
             self._unsub_poll = None
 
-    async def _poll_callback(self, now: Any) -> None:
-        """Periodic poll callback."""
+    async def _poll_callback(self, now: Any = None) -> None:
+        """Poll callback that reschedules itself at a dynamic interval."""
+        self._unsub_poll = None
         try:
             await self.async_update()
         except Exception as err:
             _LOGGER.exception("Poll callback error: %s", err)
+        moving = self.state.motor_control_mode in (1, 2)
+        active = time.time() < self._active_until or moving
+        self._schedule_next_poll(POLL_INTERVAL_FAST if active else POLL_INTERVAL_SLOW)
 
 
 def _snake(name: str) -> str:

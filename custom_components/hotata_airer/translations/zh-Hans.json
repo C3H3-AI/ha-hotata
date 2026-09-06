@@ -98,7 +98,9 @@
           "normal": "正常",
           "auth_expired": "登录已失效",
           "too_many_requests": "请求过于频繁",
-          "server_error": "服务端异常"
+          "server_error": "服务端异常",
+          "rate_limited": "云端限频（403）",
+          "connection_error": "云端连接失败"
         }
       }
     },
@@ -109,16 +111,16 @@
       "power": {
         "name": "电源状态"
       }
-    }
-  },
-  "number": {
-    "descent_time": {
-      "name": "下降时长"
-    }
-  },
-  "button": {
-    "reset_position": {
-      "name": "重置位置"
+    },
+    "number": {
+      "descent_time": {
+        "name": "下降时长"
+      }
+    },
+    "button": {
+      "reset_position": {
+        "name": "重置位置"
+      }
     }
   }
 }

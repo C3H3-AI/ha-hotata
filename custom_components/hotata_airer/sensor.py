@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
@@ -172,8 +173,25 @@ class ErrorStateSensor(SensorEntity):
 
     @property
     def native_value(self) -> str:
-        """Return the error description."""
+        """Return the machine-readable error key (translated by HA)."""
+        issues = self._hub.account.active_issues
+        if "rate_limited" in issues:
+            return "rate_limited"
+        if "connection_error" in issues:
+            return "connection_error"
         return self._hub.last_error or "normal"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Expose active issues and raw server error text for diagnostics."""
+        attrs: dict[str, Any] = {}
+        detail = self._hub.last_error_detail
+        if detail:
+            attrs["detail"] = detail
+        issues = self._hub.account.active_issues
+        if issues:
+            attrs["active_issues"] = issues
+        return attrs
 
     @property
     def available(self) -> bool:

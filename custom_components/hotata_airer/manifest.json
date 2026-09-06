@@ -1,7 +1,7 @@
 {
   "domain": "hotata_airer",
   "name": "Hotata Airer",
-  "version": "3.0.2",
+  "version": "3.0.3",
   "homeassistant": "2024.12",
   "documentation": "https://github.com/C3H3-AI/ha-hotata-airer",
   "issue_tracker": "https://github.com/C3H3-AI/ha-hotata-airer/issues",

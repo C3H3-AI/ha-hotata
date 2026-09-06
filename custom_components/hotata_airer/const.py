@@ -1,6 +1,19 @@
 """Constants for Hotata Airer integration."""
 
-POLL_INTERVAL = 5
+# Dynamic polling: poll fast only while the motor runs or right after a
+# control command, slow otherwise. The server answers 403 (操作过于频繁) when
+# polled too hard, so steady-state request volume must stay low.
+POLL_INTERVAL_FAST = 5
+POLL_INTERVAL_SLOW = 30
+# Re-send an active window after each control command so the resulting motor
+# movement is tracked at fast rate until it settles.
+POLL_ACTIVE_WINDOW = 70
+# Online status changes rarely; checking it every poll doubles the request
+# volume for no benefit.
+ONLINE_CHECK_INTERVAL = 120
+# After a 403 (操作过于频繁) the server keeps rejecting for a long window, and
+# every request during the penalty may extend it — go fully silent for 24h.
+RATE_LIMIT_BACKOFF = 86400
 API_BASE = "https://saas.keyoo.com/app-api/v2.0"
 API_LOGIN_PASSWORD = f"{API_BASE}/login/password"
 API_REFRESH_TOKEN = f"{API_BASE}/login/spLogin/refreshToken"

@@ -22,6 +22,20 @@ def _truncate_token(value: str, max_len: int = _TRUNCATE_MAX) -> str:
     return value
 
 
+def _redact_entry_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Redact credentials (tokens truncated, password masked) for diagnostics."""
+    redacted: dict[str, Any] = {}
+    for key, value in data.items():
+        lowered = key.lower()
+        if lowered == "password":
+            redacted[key] = "<redacted>"
+        elif "token" in lowered:
+            redacted[key] = _truncate_token(value)
+        else:
+            redacted[key] = value
+    return redacted
+
+
 def _device_state(hub: HotataHub) -> dict[str, Any]:
     """Collect diagnostic data for a single device hub."""
     s = hub.state
@@ -75,10 +89,7 @@ async def async_get_config_entry_diagnostics(
             "version": entry.version,
             "domain": entry.domain,
             "title": entry.title,
-            "data": {
-                k: _truncate_token(v) if "token" in k.lower() else v
-                for k, v in entry.data.items()
-            },
+            "data": _redact_entry_data(entry.data),
             "options": entry.options,
         },
         "devices": [],

@@ -98,7 +98,9 @@
           "normal": "Normal",
           "auth_expired": "Auth Expired",
           "too_many_requests": "Too Many Requests",
-          "server_error": "Server Error"
+          "server_error": "Server Error",
+          "rate_limited": "Rate Limited (403)",
+          "connection_error": "Connection Failed"
         }
       }
     },
@@ -109,16 +111,16 @@
       "power": {
         "name": "Power State"
       }
-    }
-  },
-  "number": {
-    "descent_time": {
-      "name": "Descent Time"
-    }
-  },
-  "button": {
-    "reset_position": {
-      "name": "Reset Position"
+    },
+    "number": {
+      "descent_time": {
+        "name": "Descent Time"
+      }
+    },
+    "button": {
+      "reset_position": {
+        "name": "Reset Position"
+      }
     }
   }
 }
