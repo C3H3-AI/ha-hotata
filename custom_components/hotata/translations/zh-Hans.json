@@ -1,5 +1,5 @@
 {
-  "domain": "hotata_airer",
+  "domain": "hotata",
   "title": "好太太晾衣机",
   "config": {
     "step": {
@@ -14,10 +14,12 @@
       },
       "reconfigure": {
         "title": "重新登录好太太账号",
-        "description": "更新好太太智联 App 的登录凭证（例如修改了密码）。系统会自动重新登录并刷新设备列表。",
+        "description": "更新好太太智联 App 的登录凭证（例如修改了密码）。系统会自动重新登录并刷新设备列表。可选填入绑定同一设备的备用账号（如家人的账号）：主账号被云端限频（403）时会自动切换到备用账号继续控制，处罚解除后自动切回。",
         "data": {
           "username": "用户名（手机号）",
-          "password": "密码"
+          "password": "密码",
+          "backup_username": "备用账号用户名（可选，用于 403 限频自动切换）",
+          "backup_password": "备用账号密码（留空保持不变）"
         }
       }
     },
@@ -66,39 +68,10 @@
       }
     },
     "sensor": {
-      "position": {
-        "name": "位置"
-      },
-      "light_remaining_time": {
-        "name": "照明剩余时间"
-      },
-      "drying_remaining_time": {
-        "name": "烘干剩余时间"
-      },
-      "air_drying_remaining_time": {
-        "name": "风干剩余时间"
-      },
-      "disinfection_remaining_time": {
-        "name": "消毒剩余时间"
-      },
-      "ions_remaining_time": {
-        "name": "负离子剩余时间"
-      },
-      "motor_control_mode": {
-        "name": "电机状态",
-        "state": {
-          "0": "停止",
-          "1": "上升中",
-          "2": "下降中"
-        }
-      },
-      "error_state": {
+      "integration_status": {
         "name": "集成状态",
         "state": {
           "normal": "正常",
-          "auth_expired": "登录已失效",
-          "too_many_requests": "请求过于频繁",
-          "server_error": "服务端异常",
           "rate_limited": "云端限频（403）",
           "connection_error": "云端连接失败"
         }
@@ -107,9 +80,6 @@
     "binary_sensor": {
       "online_status": {
         "name": "在线状态"
-      },
-      "power": {
-        "name": "电源状态"
       }
     },
     "number": {

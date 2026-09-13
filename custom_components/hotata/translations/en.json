@@ -1,5 +1,5 @@
 {
-  "domain": "hotata_airer",
+  "domain": "hotata",
   "title": "Hotata Airer",
   "config": {
     "step": {
@@ -14,10 +14,12 @@
       },
       "reconfigure": {
         "title": "Re-login to Hotata",
-        "description": "Update your Hotata Smart Home credentials (e.g. after changing your password). The integration will automatically re-login and refresh the device list.",
+        "description": "Update your Hotata Smart Home credentials (e.g. after changing your password). Optionally provide a backup account: when the primary account is rate-limited (403) by the Hotata cloud, the integration automatically fails over to the backup account and switches back once the penalty expires.",
         "data": {
           "username": "Username (phone number)",
-          "password": "Password"
+          "password": "Password",
+          "backup_username": "Backup account username (optional, for 403 failover)",
+          "backup_password": "Backup account password (leave empty to keep current)"
         }
       }
     },
@@ -53,7 +55,7 @@
         "name": "Power"
       },
       "drying": {
-        "name": "Drying"
+        "name": "Hot Drying"
       },
       "air_drying": {
         "name": "Air Drying"
@@ -66,39 +68,10 @@
       }
     },
     "sensor": {
-      "position": {
-        "name": "Position"
-      },
-      "light_remaining_time": {
-        "name": "Light Remaining"
-      },
-      "drying_remaining_time": {
-        "name": "Drying Remaining"
-      },
-      "air_drying_remaining_time": {
-        "name": "Air Drying Remaining"
-      },
-      "disinfection_remaining_time": {
-        "name": "Disinfection Remaining"
-      },
-      "ions_remaining_time": {
-        "name": "Ions Remaining"
-      },
-      "motor_control_mode": {
-        "name": "Motor State",
-        "state": {
-          "0": "Stopped",
-          "1": "Rising",
-          "2": "Descending"
-        }
-      },
-      "error_state": {
+      "integration_status": {
         "name": "Integration Status",
         "state": {
           "normal": "Normal",
-          "auth_expired": "Auth Expired",
-          "too_many_requests": "Too Many Requests",
-          "server_error": "Server Error",
           "rate_limited": "Rate Limited (403)",
           "connection_error": "Connection Failed"
         }
@@ -107,9 +80,6 @@
     "binary_sensor": {
       "online_status": {
         "name": "Online Status"
-      },
-      "power": {
-        "name": "Power State"
       }
     },
     "number": {

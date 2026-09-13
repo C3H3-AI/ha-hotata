@@ -1,0 +1,68 @@
+set_property:
+  name: Set property
+  description: >-
+    Write one thing-model property of a device. Admin-only escape hatch for
+    properties the integration does not expose as entities.
+  fields:
+    iot_id:
+      name: IoT ID
+      description: The iotId of the target device (see the device's 状态 sensor attributes).
+      required: true
+      example: dNl3rypkpU6cBXGQHrzB000000
+    property:
+      name: Property
+      description: The TSL property identifier, e.g. LightSwitch.
+      required: true
+      example: LightSwitch
+    value:
+      name: Value
+      description: The value to write (1/0 for switches).
+      required: true
+      example: 1
+
+invoke_service:
+  name: Invoke service
+  description: >-
+    Invoke a thing-model service on a device. Admin-only escape hatch for
+    services the integration does not expose as entities.
+  fields:
+    iot_id:
+      name: IoT ID
+      description: The iotId of the target device.
+      required: true
+      example: dNl3rypkpU6cBXGQHrzB000000
+    identifier:
+      name: Service
+      description: The TSL service identifier, e.g. LightBrightnessControl.
+      required: true
+      example: LightBrightnessControl
+    args:
+      name: Arguments
+      description: Service arguments object.
+      required: false
+      example: {"Brightness": 80}
+
+query:
+  name: Query
+  description: >-
+    Run a read-only cloud API query and return the response. Admin-only and
+    restricted to an allowlist, so it can never reach a mutation endpoint.
+  fields:
+    query:
+      name: Query
+      description: One of the allowlisted read-only queries.
+      required: true
+      example: device_properties
+    iot_id:
+      name: IoT ID
+      description: Optional iotId; added to the params as iotId automatically.
+      required: false
+    params:
+      name: Params
+      description: Additional request params.
+      required: false
+      example: {}
+    config_entry_id:
+      name: Config entry
+      description: Required only when multiple Hotata accounts are configured.
+      required: false
