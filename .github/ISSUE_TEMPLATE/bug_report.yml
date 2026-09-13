@@ -1,0 +1,42 @@
+name: Bug Report
+description: 提交 bug
+labels: bug
+body:
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      placeholder: 1. ... 2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+    validations:
+      required: true
+  - type: input
+    id: ha_version
+    attributes:
+      label: HA 版本
+      placeholder: 2026.9.x
+    validations:
+      required: true
+  - type: input
+    id: integration_version
+    attributes:
+      label: 集成版本
+      placeholder: v4.0.x
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志（可选）
+      render: shell

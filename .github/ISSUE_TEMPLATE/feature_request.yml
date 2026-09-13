@@ -1,0 +1,16 @@
+name: Feature Request
+description: 提新功能
+labels: enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: 期望方案
+    validations:
+      required: true
