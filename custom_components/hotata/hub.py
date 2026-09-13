@@ -477,10 +477,10 @@ class HotataAccount:
             if not self._using_backup:
                 return False
             try:
-                # Probe: account-level read (listBindings). A fresh IoT
-                # credential does NOT lift a throttled account's penalty,
-                # so verify with a real request before switching.
-                await self._primary_api.async_list_devices()
+                # Round 1: account-level read. A fresh IoT credential
+                # does NOT lift a throttled account's penalty, so
+                # verify the account is free before trying devices.
+                devices = await self._primary_api.async_list_devices()
             except HotataRateLimited:
                 self._primary_penalty_until = (
                     time.time() + SWITCH_BACK_PROBE_DELAY
@@ -488,11 +488,9 @@ class HotataAccount:
                 self._switch_back_failures += 1
                 self._async_save_runtime_state()
                 self._schedule_switch_back()
-                _LOGGER.info("Primary still rate-limited, staying on backup")
+                _LOGGER.info("Primary still rate-limited (account probe), staying on backup")
                 return False
             except HotataAuthError as err:
-                # Credentials rejected — refresh was already attempted inside
-                # the client; retry later on the probe schedule.
                 self._switch_back_failures += 1
                 self._schedule_switch_back()
                 _LOGGER.warning("Primary probe auth failed: %s", err)
@@ -500,9 +498,54 @@ class HotataAccount:
             except HotataError as err:
                 self._switch_back_failures += 1
                 self._schedule_switch_back()
-                _LOGGER.warning("Primary probe failed: %s", err)
+                _LOGGER.warning("Primary account probe failed: %s", err)
                 return False
-            # Probe OK — activate the primary identity.
+
+            # Round 2: device-level probe. Account probe alone may pass
+            # when throttling only applies to device-level requests.
+            # Query properties of the first discovered device — this is
+            # the same heavy request the coordinator polls with, so if
+            # it 403s here we know the primary is still unfit for
+            # real traffic and we keep the backup.
+            if devices:
+                try:
+                    await self._primary_api.async_get_properties(
+                        devices[0].iot_id
+                    )
+                except HotataRateLimited:
+                    self._primary_penalty_until = (
+                        time.time() + SWITCH_BACK_PROBE_DELAY
+                    )
+                    self._switch_back_failures += 1
+                    self._async_save_runtime_state()
+                    self._schedule_switch_back()
+                    _LOGGER.info(
+                        "Primary still rate-limited (device probe on %s), "
+                        "staying on backup",
+                        devices[0].iot_id,
+                    )
+                    return False
+                except HotataAuthError as err:
+                    self._switch_back_failures += 1
+                    self._schedule_switch_back()
+                    _LOGGER.warning(
+                        "Primary device probe auth failed on %s: %s",
+                        devices[0].iot_id,
+                        err,
+                    )
+                    return False
+                except HotataError as err:
+                    self._switch_back_failures += 1
+                    self._schedule_switch_back()
+                    _LOGGER.warning(
+                        "Primary device probe failed on %s: %s",
+                        devices[0].iot_id,
+                        err,
+                    )
+                    return False
+
+            # Heavy probe OK — the primary account can actually serve
+            # real traffic. Activate the primary identity.
             self._using_backup = False
             self._primary_penalty_until = 0.0
             self._switch_back_failures = 0

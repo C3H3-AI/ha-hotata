@@ -108,7 +108,7 @@ SENSORS: tuple[HotataSensorDescription, ...] = (
     ),
     _sensor(
         "DeviceModelType",
-        "设备型号",
+        "机型功能配置",
         value_map={
             0: "照明、消毒、风干、烘干",
             1: "照明",
