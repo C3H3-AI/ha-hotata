@@ -5,6 +5,7 @@
     "@C3H3-AI"
   ],
   "config_flow": true,
+  "dependencies": [],
   "documentation": "https://github.com/C3H3-AI/ha-hotata",
   "integration_type": "device",
   "iot_class": "cloud_polling",
@@ -14,4 +15,3 @@
   ],
   "version": "4.0.2"
 }
-
