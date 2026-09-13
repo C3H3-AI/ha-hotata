@@ -1,0 +1,18 @@
+{
+  "domain": "hotata",
+  "name": "Hotata",
+  "version": "4.0.0",
+  "homeassistant": "2024.12",
+  "documentation": "https://github.com/C3H3-AI/ha-hotata",
+  "issue_tracker": "https://github.com/C3H3-AI/ha-hotata/issues",
+  "requirements": [
+    "cryptography>=42.0.0"
+  ],
+  "codeowners": [
+    "@C3H3-AI"
+  ],
+  "iot_class": "cloud_polling",
+  "integration_type": "device",
+  "config_flow": true,
+  "icon": "mdi:clothesline"
+}

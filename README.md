@@ -1,10 +1,10 @@
-# Hotata Airer (好太太智能晾衣机)
+# Hotata (好太太智能设备)
 
-[![GitHub Release](https://img.shields.io/github/v/release/C3H3-AI/ha-hotata-airer?style=flat-square)](https://github.com/C3H3-AI/ha-hotata-airer/releases)
-[![GitHub Downloads](https://img.shields.io/github/downloads/C3H3-AI/ha-hotata-airer/total?style=flat-square)](https://github.com/C3H3-AI/ha-hotata-airer/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/C3H3-AI/ha-hotata?style=flat-square)](https://github.com/C3H3-AI/ha-hotata/releases)
+[![GitHub Downloads](https://img.shields.io/github/downloads/C3H3-AI/ha-hotata/total?style=flat-square)](https://github.com/C3H3-AI/ha-hotata/releases)
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5?style=flat-square)](https://github.com/hacs/integration)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-2024.12%2B-blue?style=flat-square)](https://www.home-assistant.io/)
-[![License](https://img.shields.io/badge/license-CC%20BY--NC%204.0-green?style=flat-square)](LICENSE)
+[![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
 
 Home Assistant 自定义集成，支持好太太智能晾衣机的完整控制。
 
@@ -14,16 +14,44 @@ Home Assistant 自定义集成，支持好太太智能晾衣机的完整控制�
 
 | 功能 | 说明 |
 |------|------|
-| 晾衣架升降 | cover 实体，支持开/关/停和位置模拟 |
-| 照明控制 | light 实体，支持开关和亮度调节 |
-| 电源/烘干/风干/消毒/负离子 | switch 实体，独立控制 |
-| 定时提醒 | sensor 实体，显示各功能剩余时间 |
-| 在线状态 | binary_sensor 实体，设备连接状态 |
-| 下降时长配置 | number 实体，配置全程下降时间 |
-| 位置重置 | button 实体，校准模拟位置 |
-| 自动 Token 刷新 | 双层保障：refreshToken 定期刷新 + 失效后自动用账号密码重登录 |
-| 用户名密码登录 | v3.0 新增，无需再从小程序抓包获取 refreshToken |
-| 多设备支持 | 可添加多台好太太晾衣机 |
+| 晾衣架升降 | cover 实体，开/关/停 + 时间模拟位置 + 自动停止（A/B 双杆机型自动扩展） |
+| 照明控制 | light 实体：开关 / 亮度（高级机型）/ 灯带色温与彩色 |
+| 晾衣机开关组 | 电源/烘干/风干/消毒/负离子，按 DeviceModelType 机型门控 |
+| 高级晾衣机功能 | 人体感应/太阳追踪/智能晾晒/语音交互/最佳取衣位/夜灯等（机型支持时自动创建） |
+| 窗帘机 | V1（属性控制）与 V2（服务控制）两代，支持百分比位置 |
+| 毛巾架 | 柔烘/暖烘/烘干/除菌/自定义模式按钮 + 暂停/继续 |
+| 智能门锁 | 18 个锁状态传感器 + 门锁事件实体（开门/门铃/防拆/劫持等） |
+| 传感器类设备 | 人体/门磁/烟感/燃气/水浸/空气质量（温湿度/PM2.5/甲醛） |
+| 摄像头 | 云台方向按钮 + 清晰度/移动侦测灵敏度 select |
+| 音乐盒子 | media_player（播放/暂停/切歌/音量） |
+| 插座/墙壁开关/广播 | 童锁/指示灯/断电保护、三路开关、门铃/语音消息/音量 |
+| 通用逃生通道 | set_property / invoke_service / query（只读白名单）三个服务 |
+| 用户名密码登录 | 输入好太太智联账号密码即可，全设备自动发现 |
+| 主备账号自动切换 | 主账号被云端限频（403）时自动切换备用账号，处罚解除后自动切回 |
+| 智能限频退避 | 动态轮询（活动 5s/空闲 30s），被限频后完全静默避免处罚延长 |
+| 诊断 | 每设备「状态」传感器暴露云端原始属性 + TSL 物模型 |
+
+---
+
+## ⚠️ 从 v3.x 升级：必须删除后重新安装
+
+本版本将集成的内部标识（domain）从 `hotata_airer` 改为 `hotata`，同时仓库更名为
+`ha-hotata`。**这是一次破坏性变更，无法自动迁移**，请按以下步骤操作：
+
+1. 升级前记录你的**下降时长**配置（如有自定义）
+2. 在 HA 中删除旧集成：设置 → 设备与服务 → **Hotata Airer** → 删除
+3. 重启 Home Assistant
+4. 删除残留目录：`custom_components/hotata_airer/`（**务必确认已删除**，否则会冲突）
+5. 按下方方式安装新版本 `custom_components/hotata/`
+6. 重启 HA，重新添加集成并登录账号
+7. 重新配置下降时长（实体 `number.*_descent_time`）
+
+> **为什么不做自动迁移？**
+> Home Assistant 将配置条目与 domain 强绑定，且不支持原地修改 domain。
+> 而 unique_id 中也包含 domain，一旦改名，旧实体会变成孤儿、历史数据断链。
+> 与其在集成里硬扛一套脆弱的迁移逻辑，不如删装重配一次，干净且可靠。
+
+**影响范围**：所有旧实体 ID 会变化，引用它们的**自动化、脚本、仪表盘需重新指向新实体**。
 
 ---
 
@@ -31,22 +59,22 @@ Home Assistant 自定义集成，支持好太太智能晾衣机的完整控制�
 
 ### 方式一：HACS（推荐）
 
-[![Open in HACS](https://img.shields.io/badge/Open%20in-HACS-41BDF5?style=flat-square)](https://my.home-assistant.io/redirect/hacs_repository/?owner=C3H3-AI&repository=ha-hotata-airer)
+[![Open in HACS](https://img.shields.io/badge/Open%20in-HACS-41BDF5?style=flat-square)](https://my.home-assistant.io/redirect/hacs_repository/?owner=C3H3-AI&repository=ha-hotata)
 
 1. 安装 [HACS](https://hacs.xyz/)
 2. HACS → 集成 → 右上角三点菜单 → 添加自定义存储库
-3. 仓库地址：`https://github.com/C3H3-AI/ha-hotata-airer`
-4. 搜索并安装 **Hotata Airer**
+3. 仓库地址：`https://github.com/C3H3-AI/ha-hotata`
+4. 搜索并安装 **Hotata**
 5. 重启 Home Assistant
 
 ### 方式二：手动安装
 
 ```bash
 # 克隆仓库
-git clone https://github.com/C3H3-AI/ha-hotata-airer.git
+git clone https://github.com/C3H3-AI/ha-hotata.git
 
 # 复制到 HA 自定义组件目录
-cp -r custom_components/hotata_airer /path/to/your/ha/config/custom_components/
+cp -r custom_components/hotata /path/to/your/ha/config/custom_components/
 
 # 重启 HA
 ```
@@ -68,17 +96,37 @@ cp -r custom_components/hotata_airer /path/to/your/ha/config/custom_components/
 | 用户名 | 必填，好太太智联 App 注册手机号 |
 | 密码 | 必填，好太太智联 App 登录密码 |
 | 下降时长 | 可选，晾衣架从顶到底所需秒数（默认 10s） |
+| 备用账号/密码 | 可选（重新配置中填写），绑定同一设备的备用账号（如家人的账号），用于 403 限频自动切换 |
+
+### 机型功能门控（v3.1.1）
+
+好太太云端对每台设备上报**全部**属性，但低端机型并不真正支持所有功能。集成按 `DeviceModelType` 自动只创建机型支持的控制项：
+
+| DeviceModelType | 机型功能 | 创建的开关 |
+|------|------|------|
+| 0 | 照明+消毒+风干+烘干 | 电源/消毒/风干/烘干/负离子 全部 |
+| 1 | 照明 | 仅电源、负离子 |
+| 2 | 照明+消毒 | 电源/消毒/负离子 |
+| 3 | 照明+消毒+风干 | 电源/消毒/风干/负离子 |
+
+对应的剩余时间传感器做同样过滤。设备型号未知（首次轮询失败）时保守创建全部实体。首次启用后如出现旧的 `unavailable` 孤儿实体（机型不支持且曾创建过），可在实体设置中删除。
+
+### 主备账号自动切换（v3.1）
+
+好太太云端对高频请求返回 403「操作过于频繁」并按账号处罚。配置备用账号后：
+
+1. 主账号被限频 → **立即自动切换**到备用账号，晾衣机控制不中断
+2. 主账号处罚（约 24 小时）到期后 → 自动探测，确认可用后**自动切回**，并发送通知
+3. 若备用账号也被限频 → 集成完全静默 24 小时，之后自动重试
+4. 403 处罚按账号独立计算，切换过程不会互相污染两边的登录凭证
 
 > **提示**：登录成功后自动发现该账号下所有晾衣机设备，无需手动输入设备信息。
 
-### Token 自动刷新机制
+### 工作原理（v4.0.0）
 
-集成采用双层保障，无需手动干预：
+传输层采用与官方「好太太智联」App（3.5.8）一致的**阿里云 IoT 网关通道**，支持好太太全产品线；实体按设备的 TSL 物模型 + 上报属性**动态创建**——账号下有什么设备就出现什么实体，不支持的属性不会生成死控件。
 
-1. **refreshToken 定期刷新**：每 6 小时自动用 refreshToken 换取新的 accessToken
-2. **自动重登录**：当 refreshToken 也失效时（如服务器侧过期），自动用保存的账号密码重新登录获取新 token
-
-仅在账号密码被修改导致重登录失败时，才会发送通知提醒你更新密码。
+Token 由网关客户端在认证被拒时自动刷新（失败自动回落到账号密码重登录）；主账号被 403 限频时进入本项目独有的主备切换状态机（见下）。旧版（v3 及以下，keyoo 小程序 API）配置项会自动迁移到 v4，无需任何手动操作。
 
 ---
 
@@ -114,7 +162,11 @@ cp -r custom_components/hotata_airer /path/to/your/ha/config/custom_components/
 | `disinfection_remaining_time` | 消毒定时 | 消毒定时剩余分钟数 |
 | `ions_remaining_time` | 负离子定时 | 负离子定时剩余分钟数 |
 | `motor_control_mode` | 电机状态 | 当前运行模式（停止/上升/下降） |
-| `error_state` | 异常状态 | 集成异常描述信息 |
+| `error_state` | 异常状态 | 集成异常描述信息（含主备切换状态） |
+| `temperature` | 温度 | 环境温度（机型上报时自动创建） |
+| `humidity` | 湿度 | 环境湿度（机型上报时自动创建） |
+| `error_code` | 设备错误码 | 设备故障码，0=无故障（机型上报时自动创建） |
+| `raw_properties` | 原始属性 | 云端上报的全部原始属性（诊断用，已排除入库） |
 
 ### switch（开关）
 
@@ -154,7 +206,7 @@ cp -r custom_components/hotata_airer /path/to/your/ha/config/custom_components/
 |------|----------|
 | 实体不出现 | 重启 HA，检查账号密码是否正确 |
 | 设备离线 | 检查网络连接，确认设备是否在线 |
-| 控制无响应 | 查看 HA 日志中的 `hotata_airer` 相关错误 |
+| 控制无响应 | 查看 HA 日志中的 `hotata` 相关错误 |
 | 登录失败 | 确认好太太智联 App 账号密码是否正确，可通过重新配置更新 |
 | 收到"登录已失效"通知 | 账号密码可能已修改，点击集成重新配置，输入新密码 |
 
@@ -172,6 +224,10 @@ cp -r custom_components/hotata_airer /path/to/your/ha/config/custom_components/
 
 | 版本 | 说明 |
 |------|------|
+| **v4.0.0** | **重构 + domain 更名（破坏性）**：domain 由 `hotata_airer` 改为 `hotata`，仓库更名 `ha-hotata`，目录改为 `custom_components/hotata/**——需删除旧集成后重新安装**（见上方升级说明）；传输层采用官方 App 的阿里云 IoT 网关通道，按 TSL 物模型动态创建实体，支持晾衣机/窗帘机/毛巾架/门锁/摄像头/音乐盒子/传感器/插座/墙壁开关/广播全产品线；保留主备账号 403 故障切换、动态轮询、晾衣杆位置模拟；修复 TSL 物模型解析失败（此前 select 实体无法出现）；403 限频不再当认证错误重试；许可改为 GPL-3.0 |
+| **v3.1.1** | 机型功能门控：按 DeviceModelType 隐藏机型不支持的开关与剩余时间传感器，修复新传感器缺失翻译名的问题 |
+| **v3.1.0** | **主备账号自动切换**：403 限频时自动切换备用账号、处罚解除后探测切回；重写故障切换状态机（按身份独立的处罚期限/凭证槽位/运行时 Store 持久化，重启不丢切换状态）；修复限频通知与实际行为不符、备用密码泄漏到诊断文件、token 刷新触发整集成重载等问题；新增温度/湿度/错误码/原始属性传感器与实体类别规范 |
+| **v3.0.3** | 动态轮询、在线检查节流、诊断信息脱敏 |
 | **v3.0.2** | 所有登录错误提示都附带服务器原始 message，让用户看到完整失败原因 |
 | **v3.0.1** | 修复登录失败提示不精确的问题：区分「手机号未注册」「密码错误」「验证码 required」「账号锁定」「频繁」等错误码，避免用户误判为密码错误去重置密码 |
 | **v3.0.0** | **重大升级**：支持用户名/密码直接登录（基于第三方逆向的好太太 App 登录协议实现，AES 加密 + RSA 签名），无需再从小程序抓包获取 refreshToken。新增 refreshToken 失效后自动重登录机制，双层保障 token 永久有效。支持从 v2 配置项自动迁移 |
@@ -185,7 +241,7 @@ cp -r custom_components/hotata_airer /path/to/your/ha/config/custom_components/
 
 ## License
 
-[CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/)
+[GPL-3.0](https://www.gnu.org/licenses/gpl-3.0.html)
 
 ---
 
