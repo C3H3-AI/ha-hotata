@@ -2,6 +2,10 @@
 
 > 最低 Home Assistant 版本：**2024.12.0**（声明于 `hacs.json`）
 
+## [4.0.3] - 2026-09-13
+
+- **entity.py**：`DeviceInfo.via_device` 已弃用（HA 每次启动告警，2027.8 起失效），改用 `via_device_id`。新参数需要网关的**设备注册表 ID**，而该 ID 在 `__init__` 构建 `DeviceInfo` 时尚未生成（实体先于注册表处理完成构造），因此改为在 `async_added_to_hass` 中建立关联：无 `parent_iot_id` 直接返回、网关未注册则保持顶层不设悬空 ID、已关联则空操作。独立设备（无网关）行为不变
+
 ## [4.0.2] - 2026-09-13
 
 - **两轮 heavy probe**：主号 24h 到期后先发真实请求（账号级 list_devices + 设备级 get_properties 各一次）都通过才切回，防止好太太 403 风控只卡设备请求不卡账号请求时，切回后几分钟又被打回备用号的抖动循环
