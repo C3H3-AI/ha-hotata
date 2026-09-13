@@ -1,16 +1,16 @@
 {
   "domain": "hotata",
   "name": "Hotata",
-  "version": "4.0.0",
+  "codeowners": [
+    "@C3H3-AI"
+  ],
+  "config_flow": true,
   "documentation": "https://github.com/C3H3-AI/ha-hotata",
+  "integration_type": "device",
+  "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/C3H3-AI/ha-hotata/issues",
   "requirements": [
     "cryptography>=42.0.0"
   ],
-  "codeowners": [
-    "@C3H3-AI"
-  ],
-  "iot_class": "cloud_polling",
-  "integration_type": "device",
-  "config_flow": true
+  "version": "4.0.0"
 }
