@@ -6,6 +6,7 @@ import re
 from collections.abc import Iterable
 from typing import Any
 
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import slugify
@@ -116,16 +117,47 @@ class HotataEntity(CoordinatorEntity[HotataCoordinator]):
                 or "Smart Device"
             ),
             serial_number=device.device_name,
-            via_device=(
-                (DOMAIN, device.parent_iot_id)
-                if device.parent_iot_id
-                else None
-            ),
         )
         mac = _mac_connection(device)
         if mac is not None:
             info["connections"] = {mac}
         self._attr_device_info = info
+
+    async def async_added_to_hass(self) -> None:
+        """Attach this entity's device to its gateway once both exist.
+
+        ``DeviceInfo.via_device`` (an identifier tuple) is deprecated and stops
+        working in Home Assistant 2027.8 in favour of ``via_device_id``, which
+        needs the *registry id* of the parent device. That id only exists after
+        both devices have been registered, so the link is made here rather than
+        in ``__init__`` — at construction time the gateway entry may not exist
+        yet, and passing a missing id would leave the relationship unset
+        permanently.
+        """
+        await super().async_added_to_hass()
+
+        parent_iot_id = self.device.parent_iot_id
+        if not parent_iot_id:
+            return
+
+        registry = dr.async_get(self.hass)
+
+        parent = registry.async_get_device(
+            identifiers={(DOMAIN, parent_iot_id)}
+        )
+        if parent is None:
+            # The gateway is not registered (yet). Leaving via_device_id unset
+            # is the correct outcome: a parentless device is drawn at the top
+            # level, while a dangling id would be dropped silently.
+            return
+
+        own = registry.async_get_device(
+            identifiers={(DOMAIN, self.device.iot_id)}
+        )
+        if own is None or own.via_device_id == parent.id:
+            return
+
+        registry.async_update_device(own.id, via_device_id=parent.id)
 
     @property
     def available(self) -> bool:
