@@ -2,6 +2,18 @@
 
 > 最低 Home Assistant 版本：**2024.12.0**（声明于 `hacs.json`）
 
+## [4.0.2] - 2026-09-13
+
+- **两轮 heavy probe**：主号 24h 到期后先发真实请求（账号级 list_devices + 设备级 get_properties 各一次）都通过才切回，防止好太太 403 风控只卡设备请求不卡账号请求时，切回后几分钟又被打回备用号的抖动循环
+- **备用号字段补入首次配置表单**：backup_username / backup_password 之前只在重配置步骤才有，首次添加集成看不到，failover 功能等于没激活
+- **传感器 friendly-name 改名**：DeviceModelType "设备型号" -> "机型功能配置"（原字段是硬件功能组合枚举，不是型号字符串）
+
+## [4.0.1] - 2026-09-13
+
+- **entity.py**：DeviceInfo 注入 MAC connections，HA 设备注册表能按 MAC 跨集成匹配同一台实体
+- **sensor.py**：requires_report 硬件门控，TSL 声明但硬件不支持的传感器（温度/湿度/PM2.5/甲醛等）只有云 API 实际上报了才创建
+- **switch.py**：IonsSwitch（负离子开关）恢复 MODEL_HOT_DRYING 机型门控
+
 ## [4.0.0] - 2026-09-13
 
 > ⚠️ 破坏性升级：domain 从 `hotata_airer` 改为 `hotata`，仓库更名 `ha-hotata`，无法自动迁移，需删除后重装。
