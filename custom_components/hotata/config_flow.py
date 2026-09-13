@@ -143,6 +143,12 @@ class HotataAirerConfigFlow(ConfigFlow, domain=DOMAIN):
                                 CONF_DESCENT_TIME, DEFAULT_DESCENT_TIME
                             )
                         ),
+                        CONF_BACKUP_USERNAME: user_input.get(
+                            CONF_BACKUP_USERNAME, ""
+                        ).strip(),
+                        CONF_BACKUP_PASSWORD: user_input.get(
+                            CONF_BACKUP_PASSWORD, ""
+                        ),
                         **creds,
                     },
                 )
@@ -154,6 +160,8 @@ class HotataAirerConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Required(
                     CONF_DESCENT_TIME, default=DEFAULT_DESCENT_TIME
                 ): vol.All(vol.Coerce(int), vol.Range(min=0, max=20)),
+                vol.Optional(CONF_BACKUP_USERNAME): str,
+                vol.Optional(CONF_BACKUP_PASSWORD): str,
             }
         )
         return self.async_show_form(
