@@ -74,6 +74,9 @@ AIRER_SWITCHES: tuple[HotataSwitchDescription, ...] = (
         key="IonsSwitch",
         translation_key="ions",
         icon="mdi:atom",
+        # Negative ions ship only on the full-featured flagship (model 0);
+        # lesser models declare the property in TSL but lack the hardware.
+        supported_models=MODEL_HOT_DRYING,
     ),
 )
 

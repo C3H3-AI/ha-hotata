@@ -77,6 +77,20 @@ def async_setup_dynamic_entities(
     entry.async_on_unload(coordinator.async_add_listener(add_new_entities))
 
 
+def _mac_connection(device: HotataDevice) -> tuple[str, str] | None:
+    """Return a (mac, ...) registry connection if the device exposes a MAC.
+
+    Aliyun's ``deviceName`` is the wifi MAC for Hotata devices, but some
+    product lines use random identifiers — only accept a real 12-hex MAC.
+    """
+    candidates = (device.raw.get("mac"), device.device_name)
+    for value in candidates:
+        mac = str(value or "").replace(":", "").replace("-", "").lower()
+        if len(mac) == 12 and all(c in "0123456789abcdef" for c in mac):
+            return ("mac", ":".join(mac[i : i + 2] for i in range(0, 12, 2)))
+    return None
+
+
 class HotataEntity(CoordinatorEntity[HotataCoordinator]):
     """Base class for entities associated with one cloud device.
 
@@ -92,7 +106,7 @@ class HotataEntity(CoordinatorEntity[HotataCoordinator]):
     ) -> None:
         super().__init__(coordinator)
         self.device = device
-        self._attr_device_info = DeviceInfo(
+        info = DeviceInfo(
             identifiers={(DOMAIN, device.iot_id)},
             name=device.name,
             manufacturer=NAME,
@@ -108,6 +122,10 @@ class HotataEntity(CoordinatorEntity[HotataCoordinator]):
                 else None
             ),
         )
+        mac = _mac_connection(device)
+        if mac is not None:
+            info["connections"] = {mac}
+        self._attr_device_info = info
 
     @property
     def available(self) -> bool:

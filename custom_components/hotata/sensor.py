@@ -63,6 +63,10 @@ class HotataSensorDescription(SensorEntityDescription):
 
     value_map: dict[int, str] | None = None
     supported_models: frozenset[int] | None = None
+    # TSL declarations exist for features many units lack in hardware (e.g.
+    # ambient temperature on basic airers). When True the entity is only
+    # created if the cloud actually REPORTS the property, ignoring the TSL.
+    requires_report: bool = False
 
 
 def _sensor(
@@ -75,6 +79,7 @@ def _sensor(
     value_map: dict[int, str] | None = None,
     diagnostic: bool = False,
     supported_models: frozenset[int] | None = None,
+    requires_report: bool = False,
 ) -> HotataSensorDescription:
     return HotataSensorDescription(
         key=key,
@@ -90,6 +95,7 @@ def _sensor(
         value_map=value_map,
         entity_category=EntityCategory.DIAGNOSTIC if diagnostic else None,
         supported_models=supported_models,
+        requires_report=requires_report,
     )
 
 
@@ -125,19 +131,22 @@ SENSORS: tuple[HotataSensorDescription, ...] = (
             ("DisinfectionRemainingTime", "消毒剩余时间", MODEL_DISINFECTION),
             ("AirDryingRemainingTime", "风干剩余时间", MODEL_AIR_DRYING),
             ("DryingRemainingTime", "烘干剩余时间", MODEL_HOT_DRYING),
-            ("IonsRemainingTime", "负离子剩余时间", None),
+            ("IonsRemainingTime", "负离子剩余时间", MODEL_HOT_DRYING),
             ("RemainingWorkTime", "剩余工作时间", None),
             ("TargetRunningTime", "目标运行时间", None),
             ("WorkTime", "工作时长", None),
             ("WorkRemainingTime", "剩余工作时间", None),
         )
     ),
+    # Ambient/environment sensors: hardware-dependent (TSL declares them on
+    # models without the sensors), so require an actual cloud report.
     *(
         _sensor(
             key,
             name,
             unit=UnitOfTemperature.CELSIUS,
             device_class=SensorDeviceClass.TEMPERATURE,
+            requires_report=True,
         )
         for key, name in (
             ("mtemp", "温度"),
@@ -150,24 +159,28 @@ SENSORS: tuple[HotataSensorDescription, ...] = (
         "湿度",
         unit=PERCENTAGE,
         device_class=SensorDeviceClass.HUMIDITY,
+        requires_report=True,
     ),
     _sensor(
         "Humidity",
         "湿度",
         unit=PERCENTAGE,
         device_class=SensorDeviceClass.HUMIDITY,
+        requires_report=True,
     ),
     _sensor(
         "PM25",
         "PM2.5",
         unit=CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
         device_class=SensorDeviceClass.PM25,
+        requires_report=True,
     ),
     _sensor(
         "HCHO",
         "甲醛",
         unit=CONCENTRATION_MILLIGRAMS_PER_CUBIC_METER,
         icon="mdi:molecule",
+        requires_report=True,
     ),
     *(
         _sensor(
@@ -200,8 +213,11 @@ SENSORS: tuple[HotataSensorDescription, ...] = (
     _sensor("RunningState", "运行状态"),
     _sensor("PlantName", "植物名称"),
     _sensor("PlantType", "植物类型"),
-    _sensor("FunctionStatus", "功能状态"),
-    _sensor("ModelFunctionList", "功能列表", diagnostic=True),
+    # TSL-declared but rarely reported: only create on an actual report.
+    _sensor("FunctionStatus", "功能状态", requires_report=True),
+    _sensor(
+        "ModelFunctionList", "功能列表", diagnostic=True, requires_report=True
+    ),
     _sensor("CurrentPositionPoint", "当前位置点"),
     _sensor("SlavePosition", "副杆位置"),
     _sensor("BestPickUpPosition", "最佳取衣位置"),
@@ -273,7 +289,11 @@ def _entities(coordinator: HotataCoordinator, device):
     )
     model = _model_type(device)
     for description in descriptions:
-        if not has_property(device, description.key):
+        if description.requires_report:
+            # Hardware-dependent feature: only trust actual reports, not TSL.
+            if description.key not in device.properties:
+                continue
+        elif not has_property(device, description.key):
             continue
         if (
             description.supported_models is not None
