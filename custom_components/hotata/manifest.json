@@ -12,6 +12,5 @@
   ],
   "iot_class": "cloud_polling",
   "integration_type": "device",
-  "config_flow": true,
-  "icon": "mdi:clothesline"
+  "config_flow": true
 }
