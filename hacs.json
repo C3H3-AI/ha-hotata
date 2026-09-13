@@ -1,5 +1,6 @@
 {
   "name": "Hotata",
+  "render_readme": true,
   "content_in_root": false,
   "domain": "hotata",
   "iot_class": "cloud_polling",
