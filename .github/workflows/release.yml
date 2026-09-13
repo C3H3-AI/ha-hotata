@@ -1,0 +1,44 @@
+﻿name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract changelog section
+        id: changelog
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $changelogHeader = $tag -replace '^v', ''   # v4.0.2 -> 4.0.2
+          $file = "CHANGELOG.md"
+          if (!(Test-Path $file)) {
+            Write-Output "body=no changelog file"
+            exit 0
+          }
+          $lines = Get-Content $file
+          $in = $false
+          $body = @()
+          foreach ($line in $lines) {
+            if ($line -match "^## \[" + [regex]::Escape($changelogHeader) + "\]") { $in = $true; continue }
+            if ($in -and $line -match "^## \[") { break }
+            if ($in) { $body += $line }
+          }
+          $content = ($body -join "`n").Trim()
+          if ([string]::IsNullOrWhiteSpace($content)) { $content = "(no changelog entry)" }
+          Set-Content -Path release_body.txt -Value $content -Encoding utf8
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_body.txt
+          generate_release_notes: true
