@@ -2,6 +2,11 @@
 
 > 最低 Home Assistant 版本：**2024.12.0**（声明于 `hacs.json`）
 
+## [4.0.4] - 2026-09-16
+
+- **cover.py**：`HotataRailCover` 补声明 `_attr_is_closed = None`。HA 的 `CoverEntity` 对该属性只做类型标注、无默认值（相邻的 `_attr_is_closing` / `_attr_is_opening` 均有 `= None`），未声明会让 `is_closed` 在每次状态写入时抛 `AttributeError`；每次写状态会读两次且 `cached_property` 不缓存异常，故为持续报错而非偶发
+- 由 @RainySat 在 PR #12 定位并修复
+
 ## [4.0.3] - 2026-09-13
 
 - **entity.py**：`DeviceInfo.via_device` 已弃用（HA 每次启动告警，2027.8 起失效），改用 `via_device_id`。新参数需要网关的**设备注册表 ID**，而该 ID 在 `__init__` 构建 `DeviceInfo` 时尚未生成（实体先于注册表处理完成构造），因此改为在 `async_added_to_hass` 中建立关联：无 `parent_iot_id` 直接返回、网关未注册则保持顶层不设悬空 ID、已关联则空操作。独立设备（无网关）行为不变
