@@ -87,6 +87,11 @@ class HotataRailCover(HotataEntity, CoverEntity):
     """Raise, lower, or stop one clothes-airer rail (no position)."""
 
     _attr_device_class = CoverDeviceClass.SHADE
+    # These rails have no position feedback, so is_closed can only be unknown.
+    # CoverEntity annotates _attr_is_closed without a default (unlike
+    # _attr_is_closing / _attr_is_opening), so omitting it here makes the base
+    # is_closed cached_property raise AttributeError on every state write.
+    _attr_is_closed: bool | None = None
     _attr_supported_features = (
         CoverEntityFeature.OPEN
         | CoverEntityFeature.CLOSE
