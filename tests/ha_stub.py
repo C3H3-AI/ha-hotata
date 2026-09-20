@@ -18,6 +18,49 @@ class ClientSession:
 aiohttp.ClientError = ClientError
 aiohttp.ClientSession = ClientSession
 
+# ---- voluptuous stub (service schemas are only built at import time) ----
+vol = mod('voluptuous')
+class Invalid(Exception):
+    pass
+class Schema:
+    def __init__(self, schema, **k):
+        self.schema = schema
+    def __call__(self, data):
+        return data
+class Marker:
+    """Stands in for Required/Optional keys; hashable like the real markers."""
+    def __init__(self, key, default=None, description=None):
+        self.key = key
+        self.default = default
+    def __hash__(self):
+        return hash(self.key)
+    def __eq__(self, other):
+        return self.key == getattr(other, 'key', other)
+vol.Invalid = Invalid
+vol.Schema = Schema
+vol.Required = Marker
+vol.Optional = Marker
+vol.Any = lambda *validators: validators
+vol.In = lambda container: container
+
+# ---- cryptography stub (api.py imports it; the stub never signs anything) ----
+mod('cryptography')
+mod('cryptography.hazmat')
+primitives = mod('cryptography.hazmat.primitives')
+for _name in ('hashes', 'padding', 'serialization'):
+    setattr(primitives, _name, mod(f'cryptography.hazmat.primitives.{_name}'))
+asymmetric = mod('cryptography.hazmat.primitives.asymmetric')
+asymmetric.padding = mod('cryptography.hazmat.primitives.asymmetric.padding')
+primitives.asymmetric = asymmetric
+ciphers = mod('cryptography.hazmat.primitives.ciphers')
+class Cipher:
+    def __init__(self, *a, **k):
+        pass
+ciphers.Cipher = Cipher
+ciphers.algorithms = mod('cryptography.hazmat.primitives.ciphers.algorithms')
+ciphers.modes = mod('cryptography.hazmat.primitives.ciphers.modes')
+primitives.ciphers = ciphers
+
 # ---- homeassistant core ----
 mod('homeassistant')
 config_entries = mod('homeassistant.config_entries')
@@ -30,7 +73,11 @@ class HomeAssistant:
     pass
 def callback(f):
     return f
+class ServiceCall:
+    def __init__(self, data=None):
+        self.data = data or {}
 core.HomeAssistant = HomeAssistant
+core.ServiceCall = ServiceCall
 core.callback = callback
 core.SupportsResponse = types.SimpleNamespace(ONLY='only')
 
@@ -145,3 +192,76 @@ class UpdateFailed(Exception):
 uc.DataUpdateCoordinator = DataUpdateCoordinator
 uc.UpdateFailed = UpdateFailed
 helpers.update_coordinator = uc
+
+# ---- cover platform support (minimum needed to drive HotataAirerCover) ----
+
+class _StateWriter:
+    """Counts async_write_ha_state() calls so tests can assert on them.
+
+    Shared by the CoverEntity and CoordinatorEntity stubs so the count is the
+    same no matter which one wins the MRO. Tests may also override the method
+    (class or instance level) for their own bookkeeping.
+    """
+    ha_state_writes = 0
+    def async_write_ha_state(self):
+        self.ha_state_writes = self.ha_state_writes + 1
+
+cover = mod('homeassistant.components.cover')
+ATTR_POSITION = 'position'
+class CoverDeviceClass:
+    SHADE = 'shade'
+    CURTAIN = 'curtain'
+class CoverEntityFeature:
+    """Real HA bit values, so `|` composition matches the integration."""
+    OPEN = 1
+    CLOSE = 2
+    SET_POSITION = 4
+    STOP = 8
+class CoverEntity(_StateWriter):
+    """Position-aware cover base: only the attributes the integration reads."""
+    _attr_device_class = None
+    _attr_translation_key = None
+    _attr_supported_features = 0
+    # Unlike _attr_is_closed, real HA gives these two a default.
+    _attr_is_closing: bool | None = False
+    _attr_is_opening: bool | None = False
+    _attr_current_cover_position: int | None = None
+    @property
+    def current_cover_position(self):
+        return self._attr_current_cover_position
+    @property
+    def is_closed(self):
+        return self._attr_is_closed
+    @property
+    def is_closing(self):
+        return self._attr_is_closing
+    @property
+    def is_opening(self):
+        return self._attr_is_opening
+cover.ATTR_POSITION = ATTR_POSITION
+cover.CoverDeviceClass = CoverDeviceClass
+cover.CoverEntityFeature = CoverEntityFeature
+cover.CoverEntity = CoverEntity
+comp.cover = cover
+
+ep = mod('homeassistant.helpers.entity_platform')
+class AddEntitiesCallback:
+    pass
+ep.AddEntitiesCallback = AddEntitiesCallback
+helpers.entity_platform = ep
+
+class CoordinatorEntity(_StateWriter):
+    """Coordinator-backed entity: subscribe + state write, nothing else."""
+    def __class_getitem__(cls, item):
+        return cls
+    def __init__(self, coordinator, context=None):
+        self.coordinator = coordinator
+        self.coordinator_context = context
+        self.hass = getattr(coordinator, 'hass', None)
+    async def async_added_to_hass(self):
+        self.coordinator.async_add_listener(self._handle_coordinator_update)
+    def _handle_coordinator_update(self):
+        self.async_write_ha_state()
+uc.CoordinatorEntity = CoordinatorEntity
+# HotataCoordinator subscripts the base class: DataUpdateCoordinator[...].
+DataUpdateCoordinator.__class_getitem__ = classmethod(lambda cls, item: cls)
