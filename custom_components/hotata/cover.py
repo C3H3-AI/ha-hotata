@@ -200,9 +200,17 @@ class HotataAirerCover(HotataEntity, CoverEntity):
             )
             return
         runtime = self.runtime
-        self._position = (
-            runtime.target_position if runtime.target_position is not None else 0
-        )
+        # Same `is not None` discipline as async_close_cover: an explicit
+        # target wins, and a missing one falls back to the simulated position
+        # rather than a bare literal. `target_position` is cleared by
+        # _cancel_stop_timer, so a cancelled descent landing here must not
+        # silently snap the rail to the bottom.
+        if runtime.target_position is not None:
+            self._position = runtime.target_position
+        elif runtime.simulated_position is not None:
+            self._position = runtime.simulated_position
+        else:
+            self._position = 0
         runtime.simulated_position = self._position
         runtime.closing_start = None
         runtime.target_position = None

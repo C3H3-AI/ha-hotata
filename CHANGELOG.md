@@ -2,6 +2,16 @@
 
 > 最低 Home Assistant 版本：**2024.12.0**（声明于 `hacs.json`）
 
+## [4.0.5] - 2026-09-20
+
+- **cover.py**：修复晾衣架在 HomeKit 桥接后从「已关上」状态点击图标无法上升（[Issue #13](https://github.com/C3H3-AI/ha-hotata/issues/13)）。`HotataAirerCover` 用 `self._position or 100` 计算当前位置，把合法的关闭态 `0` 当成假值替换为 `100`，导致 HomeKit 下发的 `set_cover_position(position=100)` 命中 `target == current` 被静默丢弃（无电机命令、无日志）。`async_set_cover_position` / `async_close_cover` 改为显式 `is not None` 判断，让 `0` 作为合法位置参与比较
+- **cover.py**：同根因的两个副作用一并修掉——首次从底部拖滑块会误发 `MOTOR_CLOSE`（方向相反）；`async_close_cover` 在底部触发自动停止时时长被算成完整 `descent_time` 而非最小 1 秒
+- **cover.py**：`_async_auto_stop_cover` 在 `target_position` 已被 `_cancel_stop_timer` 清空时，不再用裸 `else 0` 把位置拍到底部，改为回落到 `runtime.simulated_position`
+- **cover.py**：四个命令方法（open/close/stop/set_position）成功路径末尾补 `async_write_ha_state()`，让 HomeKit 的 `CurrentPosition` 命令后即时刷新，不必等一个协调器轮询周期；命令因 `target == current` 被跳过时补一条 debug 日志，避免故障在日志里完全不可见
+- **tests**：新增 `test_airer_cover_position.py`（issue #13 回归，32 项断言）与 `test_airer_cover_preservation.py`（非 bug 输入保持性基线，36 项断言），配套 `cover_harness.py`。在 `main` 上前者 15 项失败、本版本全绿
+- 窗帘机 V1/V2 与 A/B 杆导轨实体未改动
+- 由 @Kyle0820 在 PR #14 定位并修复
+
 ## [4.0.4] - 2026-09-16
 
 - **cover.py**：`HotataRailCover` 补声明 `_attr_is_closed = None`。HA 的 `CoverEntity` 对该属性只做类型标注、无默认值（相邻的 `_attr_is_closing` / `_attr_is_opening` 均有 `= None`），未声明会让 `is_closed` 在每次状态写入时抛 `AttributeError`；每次写状态会读两次且 `cached_property` 不缓存异常，故为持续报错而非偶发

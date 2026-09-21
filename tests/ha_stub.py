@@ -47,18 +47,110 @@ vol.In = lambda container: container
 mod('cryptography')
 mod('cryptography.hazmat')
 primitives = mod('cryptography.hazmat.primitives')
-for _name in ('hashes', 'padding', 'serialization'):
-    setattr(primitives, _name, mod(f'cryptography.hazmat.primitives.{_name}'))
+
+# hashes: only the SHA256 *selector* is passed around, never computed with.
+_hashes = mod('cryptography.hazmat.primitives.hashes')
+_hashes.SHA256 = lambda: ('SHA256',)
+primitives.hashes = _hashes
+
+# serialization: load_der_private_key returns a key object whose .sign() is
+# only used to build the `sign` field of the login body. Deterministic stand-in
+# keeps the payload shape identical without real crypto.
+_serialization = mod('cryptography.hazmat.primitives.serialization')
+class _FakeKey:
+    def sign(self, data, padding, algorithm):
+        import hashlib
+        return hashlib.sha256(data).digest()
+_serialization.load_der_private_key = lambda data, password=None: _FakeKey()
+primitives.serialization = _serialization
+
+# padding.PKCS7 is used for real by api.HotataAccount._encrypt_password, so the
+# stub must actually pad: test_v4_account drives the login path with a real
+# password. A bare module with no PKCS7 raises AttributeError there.
+_crypto_padding = mod('cryptography.hazmat.primitives.padding')
+class _PKCS7:
+    """Minimal PKCS7 padder/unpadder over the byte values the tests use."""
+    def __init__(self, block_size):
+        self.block_size = block_size // 8
+    def padder(self):
+        return _PKCS7Padder(self.block_size)
+    def unpadder(self):
+        return _PKCS7Unpadder(self.block_size)
+class _PKCS7Padder:
+    def __init__(self, block_size):
+        self._block_size = block_size
+    def update(self, data):
+        pad_len = self._block_size - (len(data) % self._block_size)
+        return data + bytes([pad_len]) * pad_len
+    def finalize(self):
+        return b''
+class _PKCS7Unpadder:
+    def __init__(self, block_size):
+        self._block_size = block_size
+    def update(self, data):
+        if not data:
+            return b''
+        pad_len = data[-1]
+        return data[:-pad_len]
+    def finalize(self):
+        return b''
+_crypto_padding.PKCS7 = _PKCS7
+primitives.padding = _crypto_padding
+
 asymmetric = mod('cryptography.hazmat.primitives.asymmetric')
-asymmetric.padding = mod('cryptography.hazmat.primitives.asymmetric.padding')
+_asym_padding = mod('cryptography.hazmat.primitives.asymmetric.padding')
+_asym_padding.PKCS1v15 = lambda: ('PKCS1v15',)
+asymmetric.padding = _asym_padding
 primitives.asymmetric = asymmetric
+
+# Cipher/algorithms/modes are used for real by
+# api.HotataAccount._encrypt_password (AES-CBC + PKCS7). The stub implements a
+# reversible stand-in instead of a no-op, so test_v4_account's login path
+# exercises the same code shape without pulling in `cryptography`.
 ciphers = mod('cryptography.hazmat.primitives.ciphers')
+
+class _Algorithms:
+    def AES(self, key):
+        return ('AES', key)
+
+class _Modes:
+    def CBC(self, iv):
+        return ('CBC', iv)
+
+class _Encryptor:
+    def __init__(self, key, iv):
+        self._key = key
+        self._iv = iv
+    def update(self, data):
+        return bytes(b ^ self._key[i % len(self._key)] for i, b in enumerate(data))
+    def finalize(self):
+        return b''
+
+class _Decryptor:
+    def __init__(self, key, iv):
+        self._key = key
+        self._iv = iv
+    def update(self, data):
+        return bytes(b ^ self._key[i % len(self._key)] for i, b in enumerate(data))
+    def finalize(self):
+        return b''
+
 class Cipher:
-    def __init__(self, *a, **k):
-        pass
+    def __init__(self, algorithm, mode):
+        self._key = algorithm[1]
+        self._iv = mode[1]
+    def encryptor(self):
+        return _Encryptor(self._key, self._iv)
+    def decryptor(self):
+        return _Decryptor(self._key, self._iv)
+
 ciphers.Cipher = Cipher
-ciphers.algorithms = mod('cryptography.hazmat.primitives.ciphers.algorithms')
-ciphers.modes = mod('cryptography.hazmat.primitives.ciphers.modes')
+_algorithms = mod('cryptography.hazmat.primitives.ciphers.algorithms')
+_algorithms.AES = _Algorithms().AES
+ciphers.algorithms = _algorithms
+_modes = mod('cryptography.hazmat.primitives.ciphers.modes')
+_modes.CBC = _Modes().CBC
+ciphers.modes = _modes
 primitives.ciphers = ciphers
 
 # ---- homeassistant core ----

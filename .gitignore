@@ -20,13 +20,20 @@ dist/
 .DS_Store
 Thumbs.db
 
-# Test & debug scripts (contain hardcoded tokens)
-ha_test_*.py
-test_*.py
-check_*.py
-fix_*.py
-update_*.py
+# Test & debug scripts (contain hardcoded tokens). Root-level scratch scripts
+# are ignored; tests/ holds the committed suite and is re-included below.
+/ha_test_*.py
+/test_*.py
+/check_*.py
+/fix_*.py
+/update_*.py
 tmp/
+
+# The committed suite lives in tests/ and must not be swallowed by the
+# scratch-script patterns above. Bytecode inside it stays ignored.
+!tests/
+!tests/*.py
+!tests/*.txt
 
 # Reverse engineering / security-sensitive analysis
 REVERSE_ENGINEERING.md
