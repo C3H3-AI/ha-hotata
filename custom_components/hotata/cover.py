@@ -200,9 +200,17 @@ class HotataAirerCover(HotataEntity, CoverEntity):
             )
             return
         runtime = self.runtime
-        self._position = (
-            runtime.target_position if runtime.target_position is not None else 0
-        )
+        # Same `is not None` discipline as async_close_cover: an explicit
+        # target wins, and a missing one falls back to the simulated position
+        # rather than a bare literal. `target_position` is cleared by
+        # _cancel_stop_timer, so a cancelled descent landing here must not
+        # silently snap the rail to the bottom.
+        if runtime.target_position is not None:
+            self._position = runtime.target_position
+        elif runtime.simulated_position is not None:
+            self._position = runtime.simulated_position
+        else:
+            self._position = 0
         runtime.simulated_position = self._position
         runtime.closing_start = None
         runtime.target_position = None
@@ -249,6 +257,9 @@ class HotataAirerCover(HotataEntity, CoverEntity):
         runtime.simulated_position = 100
         runtime.closing_start = None
         self._position = 100
+        # Write only after both _position and runtime.simulated_position are
+        # updated, so the next coordinator callback sees them in agreement.
+        self.async_write_ha_state()
 
     async def async_close_cover(self, **kwargs: Any) -> None:
         """Close the cover (下降/展开), auto-stopping at the bottom."""
@@ -261,7 +272,7 @@ class HotataAirerCover(HotataEntity, CoverEntity):
         runtime = self.runtime
         runtime.target_position = 0
         runtime.closing_start = time.time()
-        current = self._position or 100
+        current = self._position if self._position is not None else 100
         time_needed = max(1, current / 100 * runtime.descent_time)
         self._stop_timer = async_call_later(
             self.hass, time_needed, self._async_auto_stop_cover
@@ -271,6 +282,8 @@ class HotataAirerCover(HotataEntity, CoverEntity):
             current,
             time_needed,
         )
+        # Timer armed and runtime fields written: make is_closing visible now.
+        self.async_write_ha_state()
 
     async def async_stop_cover(self, **kwargs: Any) -> None:
         """Stop the cover (中途停止)."""
@@ -287,12 +300,18 @@ class HotataAirerCover(HotataEntity, CoverEntity):
             self._position = max(0, 100 - int(ratio * 100))
             runtime.simulated_position = self._position
         runtime.closing_start = None
+        # _position and runtime.simulated_position are in sync here, so the
+        # coordinator callback will not roll the estimate back.
+        self.async_write_ha_state()
 
     async def async_set_cover_position(self, **kwargs: Any) -> None:
         """Set the cover to a specific position."""
         target = kwargs.get(ATTR_POSITION, 100)
-        current = self._position or 100
+        current = self._position if self._position is not None else 100
         if target == current:
+            _LOGGER.debug(
+                "Cover already at position %d%%, skipping command", target
+            )
             return
         self._cancel_stop_timer()
         if target > current:
@@ -317,6 +336,9 @@ class HotataAirerCover(HotataEntity, CoverEntity):
             target,
             time_needed,
         )
+        # Timer armed and runtime fields written: make is_closing visible now.
+        # The ascending branch above returns early — async_open_cover writes.
+        self.async_write_ha_state()
 
 
 # ---- curtain machines ----
