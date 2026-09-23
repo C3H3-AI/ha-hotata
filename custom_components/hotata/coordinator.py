@@ -1,9 +1,15 @@
 """Polling coordinator for Hotata cloud devices.
 
 Polls with a dynamic interval: fast (5s) while a motor runs or a command was
-just sent, slow (30s) otherwise. A cloud 403 (操作过于频繁) penalizes the
-active identity through the account's failover state machine instead of being
-retried, so throttling never amplifies itself.
+just sent, slow (30s) otherwise. Any offline device pins the cadence at 30s
+and only its connectivity is probed — property and TSL reads are skipped for
+it, because an offline device rejects them and the attempts only feed the
+cloud's throttle. The first poll that sees the device back online restores the
+normal fast/slow choice.
+
+A cloud 403 (操作过于频繁) penalizes the active identity through the account's
+failover state machine instead of being retried, so throttling never amplifies
+itself.
 
 Devices are discovered recursively: gateways are expanded into their
 sub-devices, and each device's thing model is fetched to decide which
@@ -30,6 +36,7 @@ from .const import (
     EVENT_BUTTON_PRODUCT_KEYS,
     GATEWAY_PRODUCT_KEYS,
     POLL_INTERVAL_FAST,
+    POLL_INTERVAL_OFFLINE,
     POLL_INTERVAL_SLOW,
 )
 from .exceptions import HotataAuthError, HotataError, HotataRateLimited
@@ -152,6 +159,28 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
         try:
             devices = await self._async_discover_devices()
             for device in devices:
+                # Connectivity first: an offline device rejects property and
+                # TSL reads, so asking anyway only burns requests and nudges
+                # the cloud's 403 (操作过于频繁) throttle.
+                try:
+                    device.online = await self.account.api.async_get_online(
+                        device.iot_id
+                    )
+                except HotataError as err:
+                    _LOGGER.debug(
+                        "Status update failed for %s: %s",
+                        device.iot_id,
+                        err,
+                    )
+                if device.online is False:
+                    # Keep the last known properties so entities stay put
+                    # (they go unavailable via HotataEntity.available) and we
+                    # can tell the moment it comes back.
+                    _LOGGER.debug(
+                        "Device %s offline, skipping property poll",
+                        device.iot_id,
+                    )
+                    continue
                 try:
                     device.properties = await self.account.api.async_get_properties(
                         device.iot_id
@@ -175,16 +204,6 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
                             device.iot_id,
                             err,
                         )
-                try:
-                    device.online = await self.account.api.async_get_online(
-                        device.iot_id
-                    )
-                except HotataError as err:
-                    _LOGGER.debug(
-                        "Status update failed for %s: %s",
-                        device.iot_id,
-                        err,
-                    )
                 try:
                     cache_key = device.product_key or device.iot_id
                     if cache_key not in self.thing_models:
@@ -217,17 +236,37 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
             raise UpdateFailed(str(err)) from err
 
     def _adjust_poll_interval(self, devices: list[HotataDevice]) -> None:
-        """Fast-poll while a motor moves or a command was recently sent."""
+        """Pick the poll cadence from device state and recent activity.
+
+        - any device offline -> offline interval (connectivity probe only,
+          see _async_update_data), so we notice recovery without hammering
+          a device that cannot answer;
+        - a motor moving or a command just sent -> fast;
+        - otherwise -> slow.
+        """
+        offline = any(device.online is False for device in devices)
         moving = any(
             _is_motor_running(device.properties) for device in devices
         )
-        active = moving or self.account.poll_active
         fast = timedelta(seconds=POLL_INTERVAL_FAST)
         slow = timedelta(seconds=POLL_INTERVAL_SLOW)
-        wanted = fast if active else slow
+        offline_interval = timedelta(seconds=POLL_INTERVAL_OFFLINE)
+        if offline:
+            # Offline wins over "active": a probe cadence is all that is
+            # useful, and the next successful poll re-enters the normal
+            # fast/slow choice because device.online flips back to True.
+            wanted = offline_interval
+        else:
+            active = moving or self.account.poll_active
+            wanted = fast if active else slow
         if self.update_interval != wanted:
             self.update_interval = wanted
-            _LOGGER.debug("Poll interval -> %ss", wanted.total_seconds())
+            _LOGGER.debug(
+                "Poll interval -> %ss (offline=%s moving=%s)",
+                wanted.total_seconds(),
+                offline,
+                moving,
+            )
 
 
 def _is_motor_running(properties: dict[str, Any]) -> bool:

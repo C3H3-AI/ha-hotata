@@ -43,6 +43,9 @@ OPEN_ACCOUNT_HOST = "sdk.openaccount.aliyun.com"
 # command; the cloud answers 403 (操作过于频繁) when polled too hard.
 POLL_INTERVAL_FAST = 5
 POLL_INTERVAL_SLOW = 30
+# While any known device is offline, poll only its connectivity at this
+# interval and skip the (pointless) property/TSL reads it would reject.
+POLL_INTERVAL_OFFLINE = 30
 POLL_ACTIVE_WINDOW = 70
 # After a 403 (操作过于频繁) the server keeps rejecting for a long window, and
 # every request during the penalty may extend it — go fully silent for 24h.

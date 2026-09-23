@@ -2,6 +2,16 @@
 
 > 最低 Home Assistant 版本：**2024.12.0**（声明于 `hacs.json`）
 
+## [4.0.6] - 2026-09-21
+
+- **轮询优化**：设备离线时只查在线状态，不再拉取属性/事件/TSL
+  - `_async_update_data` 改为**先读在线状态再读属性**。原先先拉属性、最后才查在线，离线设备必然白白浪费一次属性请求，且这些失败请求会助推云端 403（操作过于频繁）限频
+  - 在线状态明确为 `False` 的设备跳过 `get_properties` / `get_latest_event` / `get_thing_model`，**保留上一次已知属性**不置空（实体通过 `HotataEntity.available` 判 `online is not False` 转为不可用）
+  - 在线状态**读取失败**（异常）或返回 `None` 时**不当作离线**，仍照常拉属性 —— 拿不到状态不等于设备下线
+  - 按设备区分：混合场景下在线成员照常轮询，不受离线成员影响
+- **轮询间隔**：新增 `POLL_INTERVAL_OFFLINE = 30`。只要有任一已知设备离线，轮询固定 30 秒；**离线优先于快窗**，即刚下发了控制命令也不会对已离线设备跑 5 秒快轮询。下一轮发现设备回到在线即自动恢复正常的 5s/30s 动态区间
+- **tests**：新增 `test_offline_polling.py`（27 项断言）。在改动前的代码上 8 项失败，本版本全绿
+
 ## [4.0.5] - 2026-09-20
 
 - **cover.py**：修复晾衣架在 HomeKit 桥接后从「已关上」状态点击图标无法上升（[Issue #13](https://github.com/C3H3-AI/ha-hotata/issues/13)）。`HotataAirerCover` 用 `self._position or 100` 计算当前位置，把合法的关闭态 `0` 当成假值替换为 `100`，导致 HomeKit 下发的 `set_cover_position(position=100)` 命中 `target == current` 被静默丢弃（无电机命令、无日志）。`async_set_cover_position` / `async_close_cover` 改为显式 `is not None` 判断，让 `0` 作为合法位置参与比较
