@@ -1,7 +1,7 @@
 # Hotata (好太太智能设备)
 
-[![GitHub Release](https://img.shields.io/github/v/release/c3h3-bi/ha-hotata?style=flat-square)](https://github.com/c3h3-bi/ha-hotata/releases)
-[![GitHub Downloads](https://img.shields.io/github/downloads/c3h3-bi/ha-hotata/total?style=flat-square)](https://github.com/c3h3-bi/ha-hotata/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/c3h3-ci/ha-hotata?style=flat-square)](https://github.com/c3h3-ci/ha-hotata/releases)
+[![GitHub Downloads](https://img.shields.io/github/downloads/c3h3-ci/ha-hotata/total?style=flat-square)](https://github.com/c3h3-ci/ha-hotata/releases)
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5?style=flat-square)](https://github.com/hacs/integration)
 [![HA Version](https://img.shields.io/badge/Home%20Assistant-2024.12%2B-blue?style=flat-square)](https://www.home-assistant.io/)
 [![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square)](LICENSE)
@@ -59,11 +59,11 @@ Home Assistant 自定义集成，支持好太太智能晾衣机的完整控制�
 
 ### 方式一：HACS（推荐）
 
-[![Open in HACS](https://img.shields.io/badge/Open%20in-HACS-41BDF5?style=flat-square)](https://my.home-assistant.io/redirect/hacs_repository/?owner=c3h3-bi&repository=ha-hotata)
+[![Open in HACS](https://img.shields.io/badge/Open%20in-HACS-41BDF5?style=flat-square)](https://my.home-assistant.io/redirect/hacs_repository/?owner=c3h3-ci&repository=ha-hotata)
 
 1. 安装 [HACS](https://hacs.xyz/)
 2. HACS → 集成 → 右上角三点菜单 → 添加自定义存储库
-3. 仓库地址：`https://github.com/c3h3-bi/ha-hotata`
+3. 仓库地址：`https://github.com/c3h3-ci/ha-hotata`
 4. 搜索并安装 **Hotata**
 5. 重启 Home Assistant
 
@@ -71,7 +71,7 @@ Home Assistant 自定义集成，支持好太太智能晾衣机的完整控制�
 
 ```bash
 # 克隆仓库
-git clone https://github.com/c3h3-bi/ha-hotata.git
+git clone https://github.com/c3h3-ci/ha-hotata.git
 
 # 复制到 HA 自定义组件目录
 cp -r custom_components/hotata /path/to/your/ha/config/custom_components/
@@ -245,4 +245,4 @@ Token 由网关客户端在认证被拒时自动刷新（失败自动回落到�
 
 ---
 
-Made with ❤️ by [c3h3-bi](https://github.com/c3h3-bi)
+Made with ❤️ by [c3h3-ci](https://github.com/c3h3-ci)

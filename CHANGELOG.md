@@ -14,7 +14,7 @@
 
 ## [4.0.5] - 2026-09-20
 
-- **cover.py**：修复晾衣架在 HomeKit 桥接后从「已关上」状态点击图标无法上升（[Issue #13](https://github.com/c3h3-bi/ha-hotata/issues/13)）。`HotataAirerCover` 用 `self._position or 100` 计算当前位置，把合法的关闭态 `0` 当成假值替换为 `100`，导致 HomeKit 下发的 `set_cover_position(position=100)` 命中 `target == current` 被静默丢弃（无电机命令、无日志）。`async_set_cover_position` / `async_close_cover` 改为显式 `is not None` 判断，让 `0` 作为合法位置参与比较
+- **cover.py**：修复晾衣架在 HomeKit 桥接后从「已关上」状态点击图标无法上升（[Issue #13](https://github.com/c3h3-ci/ha-hotata/issues/13)）。`HotataAirerCover` 用 `self._position or 100` 计算当前位置，把合法的关闭态 `0` 当成假值替换为 `100`，导致 HomeKit 下发的 `set_cover_position(position=100)` 命中 `target == current` 被静默丢弃（无电机命令、无日志）。`async_set_cover_position` / `async_close_cover` 改为显式 `is not None` 判断，让 `0` 作为合法位置参与比较
 - **cover.py**：同根因的两个副作用一并修掉——首次从底部拖滑块会误发 `MOTOR_CLOSE`（方向相反）；`async_close_cover` 在底部触发自动停止时时长被算成完整 `descent_time` 而非最小 1 秒
 - **cover.py**：`_async_auto_stop_cover` 在 `target_position` 已被 `_cancel_stop_timer` 清空时，不再用裸 `else 0` 把位置拍到底部，改为回落到 `runtime.simulated_position`
 - **cover.py**：四个命令方法（open/close/stop/set_position）成功路径末尾补 `async_write_ha_state()`，让 HomeKit 的 `CurrentPosition` 命令后即时刷新，不必等一个协调器轮询周期；命令因 `target == current` 被跳过时补一条 debug 日志，避免故障在日志里完全不可见

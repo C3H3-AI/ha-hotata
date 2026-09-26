@@ -2,14 +2,14 @@
   "domain": "hotata",
   "name": "Hotata",
   "codeowners": [
-    "@c3h3-bi"
+    "@c3h3-ci"
   ],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/c3h3-bi/ha-hotata",
+  "documentation": "https://github.com/c3h3-ci/ha-hotata",
   "integration_type": "device",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/c3h3-bi/ha-hotata/issues",
+  "issue_tracker": "https://github.com/c3h3-ci/ha-hotata/issues",
   "requirements": [
     "cryptography>=42.0.0"
   ],
