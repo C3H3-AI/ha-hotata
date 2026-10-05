@@ -2,6 +2,12 @@
 
 > 最低 Home Assistant 版本：**2024.12.0**（声明于 `hacs.json`）
 
+## [4.0.7] - 2026-09-27
+
+- **manifest.json**：移除 `requirements` 里的 `cryptography>=42.0.0`。hassfest 新增规则：该库是 Home Assistant 自身的依赖（core 当前锁 `cryptography==50.0.1`），自定义集成不得在 manifest 中重复声明，否则 CI 报 `[REQUIREMENTS] ... must not be listed` 并失败。`api.py` 的 import 不受影响，HA 环境内始终可用
+- **仓库归属回归**：原账号解禁，`C3H3-AI/ha-hotata` 恢复为主仓库（18 star / 6 fork / 全部 PR 与 issue 均在此），`c3h3-ci/ha-hotata` 保留为灾备镜像。此前封号期间写入的 owner 引用（manifest / FUNDING / README / CHANGELOG）已改回 `C3H3-AI`
+- **release 工作流**：修掉 `release.yml` 的 UTF-8 BOM。该文件开头带 `EF BB BF`，导致 `on: push: tags: v*` 触发器从未注册 —— 这就是 `v4.0.1` 一直没有 release 的原因。另两个 workflow 无 BOM，故一直正常
+
 ## [4.0.6] - 2026-09-21
 
 - **轮询优化**：设备离线时只查在线状态，不再拉取属性/事件/TSL
