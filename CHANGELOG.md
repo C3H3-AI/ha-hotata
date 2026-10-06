@@ -2,6 +2,15 @@
 
 > 最低 Home Assistant 版本：**2024.12.0**（声明于 `hacs.json`）
 
+## [4.0.11] - 2026-10-07
+
+- **switch.py**：修复高级款晾衣机（[Issue #11](https://github.com/C3H3-AI/ha-hotata/issues/11)，D-3072S 缺除菌开关）。根因确认：晾衣机存在**两个产品族，能力描述体系完全不同**——
+  - 普通款（`AIRER_PRODUCT_KEYS`）上报机型码 `DeviceModelType`（0-3），TSL 是产品线全量模板（会列出该系列所有可能功能），上报流是 TSL 的镜像，因此**机型表是硬件的唯一权威**；
+  - 高级款（`ADVANCED_AIRER_PRODUCT_KEYS`，如 D-3072S 的 `a1abYBCSVlV`）**根本不上报机型码**，TSL 是按型号精确的（59 个属性 vs 普通款 29 个），且会上报 `ModelFunctionList`（32 位功能位图）作为逐设备真实功能清单。
+  此前对所有晾衣机统一套用「机型白名单」门控，高级款因无机型码被判定为不支持 → 除菌/风干/烘干开关全部误伤。现按产品族分流：普通款沿用机型白名单（行为不变），高级款改为「TSL 声明 + 实际上报」判定
+- **tests**：`test_capability_gating.py` 新增两个产品族的用例（25 项断言）。修复前高级款 3 项失败、修复后全绿；普通款（model=2）行为在修复前后完全一致，防止分流逻辑越界
+- 依据：D-3072S 用户的 4.0.10 诊断（`device_name=044a6997f003`，`DeviceModelType=null`，`ModelFunctionList='00000000000000000011111100110000'`），与你自己的 model=2 设备诊断交叉比对
+
 ## [4.0.10] - 2026-10-06
 
 - **新增 `hotata.export_capabilities` 诊断服务**：一键导出账号内所有设备的能力矩阵——每个 TSL 属性的声明状态、实际上报、当前值、accessMode 对照，另含"上报了但 TSL 未声明"的异常清单。排查"某机型缺开关/传感器"时，调用一次即得全部判定数据（响应可整段贴进 GitHub issue）

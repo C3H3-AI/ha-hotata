@@ -107,25 +107,36 @@ ADVANCED_AIRER_SWITCHES = (
 
 
 def _airer_model_supported(device, description: HotataSwitchDescription) -> bool:
-    """TSL presence + DeviceModelType capability gating.
+    """TSL presence + product-family capability gating.
 
-    The 0-3 product table is the authority on hardware: the TSL over-declares
-    (every airer model lists all five switches, hardware or not — verified on
-    a model-2 device that reports DryingSwitch/AirDryingSwitch/IonsSwitch it
-    does not have), and the report stream mirrors the TSL rather than the
-    hardware, so neither can be trusted where they disagree with the table.
+    Two product families describe their hardware differently, so they need
+    different gates (issue #11):
 
-    When the model code is genuinely absent there is nothing to check the
-    table against. Creating the entity would be a guess, and the entity
-    registry never removes entities, so a wrong guess is permanent — that
-    guess was v4.0.8's regression and is reverted here. The failure is made
-    visible instead: a warning names the device and the missing code so the
-    whitelist can be corrected with real data.
+    - standard airers (``AIRER_PRODUCT_KEYS``) publish a model code
+      (``DeviceModelType`` 0-3). Their TSL is a product-line template that
+      lists every possible function, and the report stream mirrors that
+      template rather than the fitted hardware — verified on a model-2 device
+      that reports DryingSwitch/AirDryingSwitch/IonsSwitch it does not have.
+      The model table is therefore the only authority on hardware.
+    - advanced airers (``ADVANCED_AIRER_PRODUCT_KEYS``) do not publish the
+      model code at all, and their TSL is per-model accurate (59 properties
+      instead of 29). Applying the model gate to them suppressed real
+      switches — the D-3072S lost its disinfection switch. They are gated on
+      declaration plus an actual report instead.
+
+    Where the model code is absent AND the family is not the advanced one,
+    there is nothing to check the table against. Creating the entity would be
+    a guess, and entities are never removed once added, so a wrong guess is
+    permanent (that guess was v4.0.8's regression). The gap is surfaced with
+    a warning instead.
     """
     if not has_property(device, description.key):
         return False
     if description.supported_models is None:
         return True
+    if device.product_key in ADVANCED_AIRER_PRODUCT_KEYS:
+        # No model code on this family: trust declaration + an actual report.
+        return description.key in device.properties
     model = property_value(device, "DeviceModelType")
     if model is None:
         _LOGGER.warning(
