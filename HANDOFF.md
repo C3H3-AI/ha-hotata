@@ -98,11 +98,11 @@ TSL 数据形状），表达方式、代码结构、注释全部重写。
 
 | 目标 | 信息 |
 |------|------|
-| 生产 HA | 192.168.1.100（HAOS），SSH root，密码见 `../home-assistant-nas/ha-standby/sync_config.sh`（本文件不重复明文）。SSH/Samba 匿名不可写。 |
+| 生产 HA | <生产HA内网IP>（HAOS），SSH root，密码见 `../home-assistant-nas/ha-standby/sync_config.sh`（本文件不重复明文）。SSH/Samba 匿名不可写。 |
 | 生产集成状态 | 代码已是 v4.0.0，但 config entry 为 `disabled_by: user`（用户此前禁用）。**UI 中启用即可**，启用时自动执行 v3→v4 迁移（免手动操作）。 |
 | 测试 HA | 本机 docker `homeassistant-test`，端口 **8125**，配置目录 `../home-assistant-nas/ha-test/config`。前端账号 `duola` / 与 SSH 相同密码。 |
 | 测试 HA 现状 | 已迁移 v4 并实测：24 个实体（其中 4 个 unavailable，见 §4b）、真实开/关往返成功、零错误。v3 孤儿实体已清理。 |
-| 备份 | 生产旧代码备份在 192.168.1.100:`/tmp/hotata_airer_backup_20260912_071042.tar.gz`（/tmp 重启即失，建议尽早移到 /backup）。 |
+| 备份 | 生产旧代码备份在 <生产HA内网IP>:`/tmp/hotata_airer_backup_20260912_071042.tar.gz`（/tmp 重启即失，建议尽早移到 /backup）。 |
 | 账号 | 生产 entry 里主账号 13800138000 + 备用账号 13800138003（密码与 SSH 相同，用户复用）。 |
 
 ## 3. 代码结构（v4）
@@ -204,7 +204,7 @@ docker restart homeassistant-test
 # 部署到生产（不影响禁用状态）
 sshpass -p <密码> rsync -avz --delete --exclude='__pycache__' \
   -e "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
-  custom_components/hotata/ root@192.168.1.100:/homeassistant/custom_components/hotata/
+  custom_components/hotata/ root@<生产HA内网IP>:/homeassistant/custom_components/hotata/
 
 # 查看集成日志（测试 HA）
 tail -f ../home-assistant-nas/ha-test/config/home-assistant.log | grep hotata
