@@ -2,6 +2,7 @@
 
 Lets the account-layer failover state machine run in bare CPython without HA.
 """
+import dataclasses
 import sys, types
 
 def mod(name):
@@ -357,3 +358,35 @@ class CoordinatorEntity(_StateWriter):
 uc.CoordinatorEntity = CoordinatorEntity
 # HotataCoordinator subscripts the base class: DataUpdateCoordinator[...].
 DataUpdateCoordinator.__class_getitem__ = classmethod(lambda cls, item: cls)
+
+# ---- switch platform support (capability-gating tests) ----
+
+sw = mod('homeassistant.components.switch')
+class SwitchDeviceClass:
+    SWITCH = 'switch'
+    OUTLET = 'outlet'
+
+@dataclasses.dataclass(frozen=True)
+class EntityDescription:
+    """The EntityDescription base the real HA platform descriptions inherit.
+
+    The integration's descriptions are `@dataclass(frozen=True, kw_only=True)`
+    subclasses, and generated dataclass __init__s only accept fields that are
+    themselves dataclass fields — so this base must be one too, and must
+    declare the common fields the integration passes.
+    """
+    key: str | None = None
+    name: str | None = None
+    icon: str | None = None
+    device_class: object = None
+    translation_key: str | None = None
+    entity_registry_enabled_default: bool = True
+
+class SwitchEntityDescription(EntityDescription):
+    pass
+class SwitchEntity(_StateWriter):
+    _attr_has_entity_name = True
+sw.SwitchDeviceClass = SwitchDeviceClass
+sw.SwitchEntityDescription = SwitchEntityDescription
+sw.SwitchEntity = SwitchEntity
+comp.switch = sw

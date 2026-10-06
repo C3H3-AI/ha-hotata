@@ -107,19 +107,33 @@ ADVANCED_AIRER_SWITCHES = (
 
 
 def _airer_model_supported(device, description: HotataSwitchDescription) -> bool:
-    """TSL presence + DeviceModelType capability gating."""
+    """TSL presence + DeviceModelType capability gating.
+
+    Three outcomes, deliberately split so the unknown-model case cannot
+    diverge from what the device itself reports:
+
+    - the property is genuinely absent (not reported, not in TSL): no entity;
+    - an explicit model code outside the whitelist: no entity — the product
+      table is the authority on hardware, and TSL over-declares (the
+      IonsSwitch case);
+    - no usable model code at all: defer to a real report. Suppressing here
+      made the switch vanish permanently for devices that never publish
+      DeviceModelType (issue #11), because entities are never removed once
+      added — while the matching remaining-time sensor, whose gate allows an
+      unknown model through, kept appearing. The two platforms must agree.
+    """
     if not has_property(device, description.key):
         return False
     if description.supported_models is None:
         return True
     model = property_value(device, "DeviceModelType")
+    if model is None:
+        # Unknown model: only an actual report proves the hardware.
+        return description.key in device.properties
     try:
         return int(model) in description.supported_models
     except (TypeError, ValueError):
-        # The model code is not usable yet (early poll, unusual payload).
-        # Stay conservative: a capability we cannot confirm must not create an
-        # entity, because entities are never removed once added.
-        return False
+        return description.key in device.properties
 
 
 def _switches_for_device(

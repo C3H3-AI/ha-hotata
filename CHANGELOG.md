@@ -2,6 +2,12 @@
 
 > 最低 Home Assistant 版本：**2024.12.0**（声明于 `hacs.json`）
 
+## [4.0.8] - 2026-10-06
+
+- **switch.py**：修复「机型码缺失时能力开关被永久隐藏」（[Issue #11](https://github.com/C3H3-AI/ha-hotata/issues/11)，D-3072S 缺除菌开关）。`_airer_model_supported` 原先在 `DeviceModelType` 取不到/不可解析时一律返回 False；而实体注册表只增不减、且动态工厂不为已存在设备补建，于是这类设备的除菌/风干/烘干/负离子开关**永久缺失**。现改为：机型码缺失时回落到「设备是否真实上报了该属性」——有上报则创建（硬件存在的直接证据），无上报仍抑制；**显式的白名单外机型码（0-3 之外）仍然压制**，产品机型表仍是硬件能力的最终权威。此前机型码缺失时 sensor 平台放行而 switch 平台压制，两平台对同一能力判定不一致，本版拉齐
+- **tests**：新增 `test_capability_gating.py`（17 项断言：机型码 × 上报状态矩阵），修复前 #11 场景（机型码缺失 + 属性已上报）失败，修复后全绿；`ha_stub.py` 补 switch 平台与 `EntityDescription` dataclass 支持
+- 实测：真实设备（model=2）`DisinfectionSwitch` / `DeviceModelType` 均在 TSL 声明且实际上报，`has_property` 的 OR 语义两侧都不为空
+
 ## [4.0.7] - 2026-09-27
 
 - **manifest.json**：移除 `requirements` 里的 `cryptography>=42.0.0`。hassfest 新增规则：该库是 Home Assistant 自身的依赖（core 当前锁 `cryptography==50.0.1`），自定义集成不得在 manifest 中重复声明，否则 CI 报 `[REQUIREMENTS] ... must not be listed` 并失败。`api.py` 的 import 不受影响，HA 环境内始终可用
