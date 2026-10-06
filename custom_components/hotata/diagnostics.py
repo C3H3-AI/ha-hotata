@@ -83,7 +83,12 @@ async def async_get_config_entry_diagnostics(
                         runtime.descent_time if runtime else None
                     ),
                     "thing_model_properties": [
-                        p.get("identifier")
+                        {
+                            "identifier": p.get("identifier"),
+                            "name": p.get("name"),
+                            "accessMode": p.get("accessMode"),
+                            "dataType": p.get("dataType"),
+                        }
                         for p in device.thing_model.get("properties", [])
                         if isinstance(p, dict)
                     ],
