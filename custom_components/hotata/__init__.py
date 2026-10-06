@@ -26,6 +26,7 @@ from .const import (
     DOMAIN,
     PLATFORMS,
     READ_ONLY_QUERIES,
+    SERVICE_EXPORT_CAPABILITIES,
     SERVICE_INVOKE_SERVICE,
     SERVICE_QUERY,
     SERVICE_SET_PROPERTY,
@@ -207,6 +208,90 @@ def _register_services(hass: HomeAssistant) -> None:
         schema=_QUERY_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
+    async_register_admin_service(
+        hass,
+        DOMAIN,
+        SERVICE_EXPORT_CAPABILITIES,
+        async_export_capabilities,
+        schema=vol.Schema({vol.Optional("config_entry_id"): cv.string}),
+        supports_response=SupportsResponse.ONLY,
+    )
+
+
+async def async_export_capabilities(call: ServiceCall) -> dict:
+    """Return a per-device capability matrix: TSL declarations vs reports.
+
+    Read-only. One TSL fetch per device (memoized per product_key inside the
+    coordinator), plus the already-cached property report. The response is
+    designed to be attached to GitHub issues when an entity is missing: it
+    shows exactly which capabilities each device declares, reports, or lacks.
+    """
+    coordinator = _find_coordinator(
+        hass, config_entry_id=call.data.get("config_entry_id")
+    )
+    devices_out = []
+    for device in (coordinator.data or {}).values():
+        try:
+            tsl = await coordinator.account.api.async_get_thing_model(
+                device.iot_id
+            )
+        except HotataError as err:
+            devices_out.append(
+                {
+                    "iot_id": device.iot_id,
+                    "name": device.name,
+                    "product_key": device.product_key,
+                    "error": f"TSL fetch failed: {err}",
+                }
+            )
+            continue
+        declared = {
+            p.get("identifier"): p
+            for p in (tsl.get("properties") or [])
+            if isinstance(p, dict) and p.get("identifier")
+        }
+        reported = set(device.properties.keys())
+        capabilities = {
+            ident: {
+                "name": p.get("name"),
+                "accessMode": p.get("accessMode"),
+                "declared_in_tsl": True,
+                "reported_by_device": ident in reported,
+                "value": (
+                    device.properties[ident].get("value")
+                    if isinstance(device.properties.get(ident), dict)
+                    and "value" in device.properties[ident]
+                    else device.properties.get(ident)
+                )
+                if ident in reported
+                else None,
+            }
+            for ident, p in sorted(declared.items())
+        }
+        # Properties the device reports but the TSL does not declare — these
+        # are the interesting anomalies when diagnosing gating problems.
+        undeclared = sorted(reported - set(declared))
+        devices_out.append(
+            {
+                "iot_id": device.iot_id,
+                "name": device.name,
+                "product_key": device.product_key,
+                "device_name": device.device_name,
+                "online": device.online,
+                "tsl_schema": tsl.get("schema"),
+                "capability_count": len(declared),
+                "capabilities": capabilities,
+                "reported_but_not_declared": undeclared,
+                "model_type": (
+                    device.properties.get("DeviceModelType", {}).get("value")
+                    if isinstance(
+                        device.properties.get("DeviceModelType"), dict
+                    )
+                    else device.properties.get("DeviceModelType")
+                ),
+            }
+        )
+    return {"devices": devices_out}
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -222,4 +307,5 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.services.async_remove(DOMAIN, SERVICE_SET_PROPERTY)
             hass.services.async_remove(DOMAIN, SERVICE_INVOKE_SERVICE)
             hass.services.async_remove(DOMAIN, SERVICE_QUERY)
+            hass.services.async_remove(DOMAIN, SERVICE_EXPORT_CAPABILITIES)
     return unloaded

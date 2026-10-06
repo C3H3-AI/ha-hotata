@@ -66,3 +66,17 @@ query:
       name: Config entry
       description: Required only when multiple Hotata accounts are configured.
       required: false
+
+export_capabilities:
+  name: Export capabilities
+  description: >-
+    Download the thing model (TSL) and current property report for every
+    device on the account and return a capability matrix. Read-only. Use it
+    to audit which capabilities each device model really declares and
+    reports — attach the response to a GitHub issue when a switch or sensor
+    is missing.
+  fields:
+    config_entry_id:
+      name: Config entry
+      description: Required only when multiple Hotata accounts are configured.
+      required: false

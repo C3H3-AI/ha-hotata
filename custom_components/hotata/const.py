@@ -136,6 +136,7 @@ LOCK_PRODUCT_KEYS = {
 SERVICE_SET_PROPERTY = "set_property"
 SERVICE_INVOKE_SERVICE = "invoke_service"
 SERVICE_QUERY = "query"
+SERVICE_EXPORT_CAPABILITIES = "export_capabilities"
 
 # Read-only API calls confirmed in FYApi/FYSDK from 好太太智联 3.5.8.
 # Values are (path, API version). The generic query service accepts keys only
