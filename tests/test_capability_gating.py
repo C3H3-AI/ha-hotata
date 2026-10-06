@@ -1,13 +1,16 @@
 """Capability-gating tests: which entities exist for which device state.
 
-Issue #11 regression: a device that reports DisinfectionSwitch but never
-reports DeviceModelType lost its disinfection switch, because the switch
-platform's model gate treated "model unknown" as "not supported" while the
-sensor platform's same gate treated it as "unverifiable, allow".
+The model whitelist (0-3) is the only authority on hardware. Live
+verification on a model-2 device proved BOTH the TSL and the report stream
+mirror the full declaration set regardless of hardware (it reports
+DryingSwitch/AirDryingSwitch/IonsSwitch it does not have), so:
 
-The gate must be consistent: an explicit model code that is OUTSIDE the
-whitelist suppresses the entity; an ABSENT model code defers to what the
-device actually reports.
+  - an explicit model code decides per the whitelist;
+  - an ABSENT model code must NOT create the entity: the registry never
+    removes entities, so a guess would be permanent. v4.0.8's "trust the
+    report" behavior was that wrong guess; these tests pin the revert, and
+    the warning the gate raises instead (so the whitelist can be corrected
+    with real data).
 
 Run from anywhere:  python3 tests/test_capability_gating.py
 """
@@ -108,18 +111,19 @@ def test_model1_without_disinfection():
 
 
 def test_unknown_model_reported_property_present():
-    """The #11 case: DisinfectionSwitch reported, DeviceModelType absent.
+    """DisinfectionSwitch reported but DeviceModelType absent.
 
-    An unknown model code must defer to the property the device actually
-    reports, not hard-suppress. Regression: this used to yield [].
+    The report mirrors the TSL, not the hardware (proven live on a model-2
+    device reporting switches it lacks), so a report is NOT evidence. The
+    entity must not be created — creating it was v4.0.8's regression.
     """
     d = make_device(
         {"PowerSwitch": 1, "DisinfectionSwitch": 0},
         tsl_ids=TSL_AIRER,
     )
     got = switch_keys(d)
-    check("unknown model: disinfection created from report",
-          "DisinfectionSwitch" in got, True)
+    check("unknown model: disinfection not created (no guess)",
+          "DisinfectionSwitch" in got, False)
 
 
 def test_unknown_model_tsl_only_declaration_suppressed():
@@ -141,8 +145,8 @@ def test_unparseable_model_reported_property_present():
         tsl_ids=TSL_AIRER,
     )
     got = switch_keys(d)
-    check("garbled model: disinfection created from report",
-          "DisinfectionSwitch" in got, True)
+    check("garbled model: disinfection not created (no guess)",
+          "DisinfectionSwitch" in got, False)
 
 
 def test_out_of_range_model_reported_property_still_suppressed():
@@ -160,16 +164,18 @@ def test_out_of_range_model_reported_property_still_suppressed():
 
 
 def test_no_tsl_declaration_no_entity_even_when_reported():
-    """Guard: the TSL is the capability contract, not the report stream.
+    """has_property is an OR (TSL-declared OR reported) by design.
 
-    has_property is an OR by design (TSL-declared OR reported): a device that
-    reports a property before its TSL entry is fetched must still get the
-    entity. Verified live — the real device reports every gating key and
-    declares every one of them in TSL, so neither side of the OR is empty.
+    Presence decides whether the gate even runs; the model whitelist then
+    decides. Verified live — the real device declares and reports every
+    gating key, so neither side of the OR is empty in practice.
     """
-    d = make_device({"PowerSwitch": 1, "DisinfectionSwitch": 0}, tsl_ids=())
+    # With an explicit in-whitelist model the OR passes and the whitelist
+    # admits it, even though only the report stream carried the key.
+    d = make_device({"PowerSwitch": 1, "DisinfectionSwitch": 0,
+                     "DeviceModelType": 2}, tsl_ids=())
     got = switch_keys(d)
-    check("reported without TSL: disinfection created (OR semantics)",
+    check("reported without TSL, model 2: created (OR semantics)",
           "DisinfectionSwitch" in got, True)
     d2 = make_device({"PowerSwitch": 1}, tsl_ids=())
     got2 = switch_keys(d2)
@@ -180,7 +186,7 @@ def test_no_tsl_declaration_no_entity_even_when_reported():
 def test_gate_function_direct():
     """Exercise _airer_model_supported directly on the boundary values."""
     desc = next(d for d in AIRER_SWITCHES if d.key == "DisinfectionSwitch")
-    for model, want in ((0, True), (2, True), (3, True), (1, False), (99, False)):
+    for model, want in ((0, True), (2, True), (3, True), (1, False), (99, False), (None, False)):
         d = make_device({"DisinfectionSwitch": 0, "DeviceModelType": model},
                         tsl_ids=TSL_AIRER)
         check(f"gate(model={model})", _airer_model_supported(d, desc), want)

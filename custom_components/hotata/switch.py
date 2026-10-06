@@ -109,18 +109,18 @@ ADVANCED_AIRER_SWITCHES = (
 def _airer_model_supported(device, description: HotataSwitchDescription) -> bool:
     """TSL presence + DeviceModelType capability gating.
 
-    Three outcomes, deliberately split so the unknown-model case cannot
-    diverge from what the device itself reports:
+    The 0-3 product table is the authority on hardware: the TSL over-declares
+    (every airer model lists all five switches, hardware or not — verified on
+    a model-2 device that reports DryingSwitch/AirDryingSwitch/IonsSwitch it
+    does not have), and the report stream mirrors the TSL rather than the
+    hardware, so neither can be trusted where they disagree with the table.
 
-    - the property is genuinely absent (not reported, not in TSL): no entity;
-    - an explicit model code outside the whitelist: no entity — the product
-      table is the authority on hardware, and TSL over-declares (the
-      IonsSwitch case);
-    - no usable model code at all: defer to a real report. Suppressing here
-      made the switch vanish permanently for devices that never publish
-      DeviceModelType (issue #11), because entities are never removed once
-      added — while the matching remaining-time sensor, whose gate allows an
-      unknown model through, kept appearing. The two platforms must agree.
+    When the model code is genuinely absent there is nothing to check the
+    table against. Creating the entity would be a guess, and the entity
+    registry never removes entities, so a wrong guess is permanent — that
+    guess was v4.0.8's regression and is reverted here. The failure is made
+    visible instead: a warning names the device and the missing code so the
+    whitelist can be corrected with real data.
     """
     if not has_property(device, description.key):
         return False
@@ -128,12 +128,26 @@ def _airer_model_supported(device, description: HotataSwitchDescription) -> bool
         return True
     model = property_value(device, "DeviceModelType")
     if model is None:
-        # Unknown model: only an actual report proves the hardware.
-        return description.key in device.properties
+        _LOGGER.warning(
+            "Capability %s: device %s does not report DeviceModelType; "
+            "cannot confirm hardware support, entity not created. Please "
+            "report this at the integration's issue tracker.",
+            description.key,
+            device.device_name or device.iot_id,
+        )
+        return False
     try:
         return int(model) in description.supported_models
     except (TypeError, ValueError):
-        return description.key in device.properties
+        _LOGGER.warning(
+            "Capability %s: device %s reports an unparseable DeviceModelType "
+            "(%r); entity not created. Please report this at the "
+            "integration's issue tracker.",
+            description.key,
+            device.device_name or device.iot_id,
+            model,
+        )
+        return False
 
 
 def _switches_for_device(

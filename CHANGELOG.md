@@ -2,11 +2,11 @@
 
 > 最低 Home Assistant 版本：**2024.12.0**（声明于 `hacs.json`）
 
-## [4.0.8] - 2026-10-06
+## [4.0.9] - 2026-10-06
 
-- **switch.py**：修复「机型码缺失时能力开关被永久隐藏」（[Issue #11](https://github.com/C3H3-AI/ha-hotata/issues/11)，D-3072S 缺除菌开关）。`_airer_model_supported` 原先在 `DeviceModelType` 取不到/不可解析时一律返回 False；而实体注册表只增不减、且动态工厂不为已存在设备补建，于是这类设备的除菌/风干/烘干/负离子开关**永久缺失**。现改为：机型码缺失时回落到「设备是否真实上报了该属性」——有上报则创建（硬件存在的直接证据），无上报仍抑制；**显式的白名单外机型码（0-3 之外）仍然压制**，产品机型表仍是硬件能力的最终权威。此前机型码缺失时 sensor 平台放行而 switch 平台压制，两平台对同一能力判定不一致，本版拉齐
-- **tests**：新增 `test_capability_gating.py`（17 项断言：机型码 × 上报状态矩阵），修复前 #11 场景（机型码缺失 + 属性已上报）失败，修复后全绿；`ha_stub.py` 补 switch 平台与 `EntityDescription` dataclass 支持
-- 实测：真实设备（model=2）`DisinfectionSwitch` / `DeviceModelType` 均在 TSL 声明且实际上报，`has_property` 的 OR 语义两侧都不为空
+- **switch.py**：**撤回 4.0.8 的错误修复**。4.0.8 在机型码缺失时按「设备是否上报该属性」放行——但真机实测（model=2 设备）证明**上报流是 TSL 的镜像而非硬件的反映**：该设备把语义表里它没有的 `DryingSwitch` / `AirDryingSwitch` / `IonsSwitch` 也全部上报。按上报放行会把烘干/风干/负离子开关错误地发给本不该有的机型。现改为：机型码缺失时不创建实体，并打 warning 日志（点名设备与缺失字段，引导用户上报，用真实数据修正白名单）；白名单外机型码仍然压制
+- **App 逆向结论（本轮补充验证）**：`classes.dex` 为 360 加固壳（587 条字符串 0 命中机型/功能），业务逻辑不在任何可读层；`assets/` 里的 `air_*.json` 全是 Lottie 动画。App 本身不维护本地机型表，能力展示完全依赖云端 TSL 下发——我们此前的 0-3 机型表来自对其 `Constants.java` 的反推，是集成自己的知识，不是 App 的行为
+- **tests**：`test_capability_gating.py` 更新为钉住正确语义（18 项断言），4.0.8 的放行行为在测试中作为回归被钉死
 
 ## [4.0.7] - 2026-09-27
 
