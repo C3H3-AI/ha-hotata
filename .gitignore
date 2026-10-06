@@ -35,6 +35,21 @@ tmp/
 !tests/*.py
 !tests/*.txt
 
+# ---- Inbound files & local scratch ----
+# Files a user sends us (diagnostics dumps, screenshots) routinely carry
+# credentials and device identifiers. Never stage them; .dsh-im/ is where the
+# harness drops inbound uploads.
+.dsh-im/
+!tests/
+!tests/*.py
+!tests/*.txt
+
+# Diagnostics exports and credential caches used while debugging.
+*_diagnostics*.json
+config_entry-*.json
+prod_creds.json
+*token*.json
+
 # Reverse engineering / security-sensitive analysis
 REVERSE_ENGINEERING.md
 
