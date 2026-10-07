@@ -57,3 +57,9 @@ REVERSE_ENGINEERING.md
 applet_copy.db
 ha_check_remote.py
 query_applet_db.py
+
+# ---- Internal handoff notes (kept out of the public repository) ----
+# Deployment commands, local paths and environment details live here; they are
+# not part of the integration. Keep them beside the checkout, not in it.
+HANDOFF.md
+HANDOFF*.md
