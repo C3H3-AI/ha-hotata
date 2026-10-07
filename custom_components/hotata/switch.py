@@ -13,6 +13,7 @@ from homeassistant.components.switch import (
     SwitchEntityDescription,
 )
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -21,6 +22,9 @@ from .capabilities import (
     CAP_DISINFECTION,
     CAP_DRYING,
     CAP_IONS,
+    CAP_SOLAR_TRACE,
+    CAP_SUN_TRACE,
+    CAP_VOICE,
     resolve,
 )
 from .const import (
@@ -35,6 +39,7 @@ from .const import (
 from .coordinator import HotataCoordinator
 from .entity import (
     HotataEntity,
+    remove_stale_entity,
     async_setup_dynamic_entities,
     entity_identity,
     has_property,
@@ -95,14 +100,25 @@ ADVANCED_AIRER_SWITCHES = (
         key="BodyInductionSwitch", name="人体感应", icon="mdi:motion-sensor"
     ),
     HotataSwitchDescription(
-        key="SolarTraceSwitch", name="太阳追踪", icon="mdi:white-balance-sunny"
+        key="SolarTraceSwitch",
+        name="太阳追踪",
+        icon="mdi:white-balance-sunny",
+        capability=CAP_SOLAR_TRACE,
     ),
     HotataSwitchDescription(
-        key="SunTraceSwitch", name="智能晾晒", icon="mdi:weather-sunny"
+        key="SunTraceSwitch",
+        name="智能晾晒",
+        icon="mdi:weather-sunny",
+        capability=CAP_SUN_TRACE,
     ),
     HotataSwitchDescription(
-        key="VoiceInteractionSwitch", name="语音交互", icon="mdi:microphone"
+        key="VoiceInteractionSwitch",
+        name="语音交互",
+        icon="mdi:microphone",
+        capability=CAP_VOICE,
     ),
+    # 最佳取衣位 / 最佳晾晒位 have no FUN_INDEX bit; the device reports them
+    # itself, so presence is the best evidence available.
     HotataSwitchDescription(
         key="BestPickUpPositionSwitch",
         name="最佳取衣位",
@@ -138,6 +154,20 @@ def _airer_model_supported(device, description: HotataSwitchDescription) -> bool
         return True
     capabilities = resolve(device)
     if capabilities is None:
+        if not device.properties:
+            # Nothing reported yet: a cold start before the first poll lands, or
+            # an offline unit with an empty cloud shadow. Entities are created
+            # once and never removed, so guessing here leaves spurious switches
+            # behind forever (seen on 2026-10-07: 风干/烘干/负离子 came back on a
+            # device whose first poll returned no properties, while the report
+            # that arrived a moment later said DeviceModelType 2). Wait for the
+            # report instead — the factory runs again on every update.
+            _LOGGER.debug(
+                "Capability %s: device %s has reported nothing yet, waiting",
+                description.key,
+                device.device_name or device.iot_id,
+            )
+            return False
         token = (device.iot_id, description.capability or description.key)
         if token not in _UNRESOLVED_WARNED:
             _UNRESOLVED_WARNED.add(token)
@@ -152,15 +182,70 @@ def _airer_model_supported(device, description: HotataSwitchDescription) -> bool
     return capabilities.has(description.capability)
 
 
+class HotataInvertDirectionSwitch(HotataEntity, SwitchEntity):
+    """Local preference: swap the rail travel direction (issue #15).
+
+    Off (default, 4.0.14): 打开/展开 lowers the rail. On: 打开 raises it, which
+    is what installations that read the travel the other way round want.
+    Nothing is sent to the cloud — the flag is stored per device and only
+    changes how the cover reports and commands its position.
+    """
+
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_name = "行程反转"
+    _attr_icon = "mdi:swap-vertical"
+
+    def __init__(self, coordinator: HotataCoordinator, device) -> None:
+        super().__init__(coordinator, device)
+        self._attr_unique_id = entity_identity(device, "invert_direction")
+
+    @property
+    def available(self) -> bool:
+        """A local preference: it stays usable while the device is offline."""
+        return True
+
+    @property
+    def is_on(self) -> bool:
+        return bool(
+            self.coordinator.runtime(self.device.iot_id).invert_direction
+        )
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self._async_set_direction(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self._async_set_direction(False)
+
+    async def _async_set_direction(self, value: bool) -> None:
+        await self.coordinator.runtime(
+            self.device.iot_id
+        ).async_set_invert_direction(value)
+        self.async_write_ha_state()
+        # The cover reads the flag on its next state write, so ask for one now
+        # instead of leaving the old position on screen until the next poll.
+        # Coordinator refreshes are debounced, so repeated toggles coalesce.
+        await self.coordinator.async_request_refresh()
+
+
 def _switches_for_device(
     coordinator: HotataCoordinator, device
 ) -> Iterable[SwitchEntity]:
     seen: set[str] = set()
 
     def add(description: HotataSwitchDescription) -> HotataSwitch | None:
-        if description.key in seen or not _airer_model_supported(
-            device, description
-        ):
+        if description.key in seen:
+            return None
+        if not _airer_model_supported(device, description):
+            if description.capability is not None:
+                resolved = resolve(device)
+                if resolved is not None and not resolved.has(
+                    description.capability
+                ):
+                    # The device says it lacks this function: an entry an
+                    # earlier version created must not linger as unavailable.
+                    remove_stale_entity(
+                        coordinator.hass, device, "switch", description.key
+                    )
             return None
         seen.add(description.key)
         return HotataSwitch(coordinator, device, description)
@@ -179,6 +264,12 @@ def _switches_for_device(
             entity = add(description)
             if entity:
                 yield entity
+    # Direction preference: only where there is a cover to reverse.
+    if (
+        family in (None, FAMILY_AIRER)
+        and has_property(device, "MotorControlMode")
+    ):
+        yield HotataInvertDirectionSwitch(coordinator, device)
     if device.product_key in ADVANCED_AIRER_PRODUCT_KEYS:
         for description in ADVANCED_AIRER_SWITCHES:
             entity = add(description)

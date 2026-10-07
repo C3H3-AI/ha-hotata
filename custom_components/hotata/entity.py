@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import logging
+
 import re
 from collections.abc import Iterable
 from typing import Any
 
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import slugify
+
+_LOGGER = logging.getLogger(__name__)
 
 from .const import DOMAIN, NAME
 from .coordinator import HotataCoordinator
@@ -32,6 +37,23 @@ def entity_identity(device: HotataDevice, entity_name: str) -> str:
             _identity_part(entity_name),
         )
     )
+
+
+def remove_stale_entity(hass, device, entity_domain: str, key: str) -> None:
+    """Drop a registry entry for an entity this integration no longer provides.
+
+    Only called when a capability is *positively* known to be absent — never
+    while the device has yet to report, because a transient gap must not delete
+    a real entity. It makes the capability fix self-healing: entries an earlier
+    version created (or one created by a poll that ran before the first report
+    arrived) disappear instead of lingering as unavailable forever.
+    """
+    registry = entity_registry.async_get(hass)
+    unique_id = entity_identity(device, key)
+    entity_id = registry.async_get_entity_id(entity_domain, DOMAIN, unique_id)
+    if entity_id:
+        _LOGGER.info("Removing stale entity %s (%s)", entity_id, key)
+        registry.async_remove(entity_id)
 
 
 def property_value(device: HotataDevice, identifier: str) -> Any:

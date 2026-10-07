@@ -17,6 +17,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from . import capabilities
 from .const import (
     ADVANCED_AIRER_PRODUCT_KEYS,
     DOMAIN,
@@ -67,6 +68,7 @@ def _lights_for_device(
         if (
             device.product_key in ADVANCED_AIRER_PRODUCT_KEYS
             and has_property(device, "LightBrightness")
+            and capabilities.supported(device, capabilities.CAP_BRIGHTNESS)
         ):
             yield HotataAdvancedAirerLight(coordinator, device)
         else:
@@ -74,12 +76,18 @@ def _lights_for_device(
                 coordinator, device, "LightSwitch", "照明", "light"
             )
     if device.product_key in ADVANCED_AIRER_PRODUCT_KEYS:
-        for identifier, name in (
-            ("ApoleLightSwitch", "A 杆照明"),
-            ("BpoleLightSwitch", "B 杆照明"),
-            ("NightLightSwitch", "夜灯"),
+        # A/B pole lamps need DOUBLE_POLE, the night lamp needs NIGHT_LIGHT.
+        # The TSL declares all three on every model of the family; the D-3072S
+        # reports none of them and its bit string clears both bits, which is
+        # why the vendor app shows neither control.
+        for identifier, name, capability in (
+            ("ApoleLightSwitch", "A 杆照明", capabilities.CAP_DOUBLE_POLE),
+            ("BpoleLightSwitch", "B 杆照明", capabilities.CAP_DOUBLE_POLE),
+            ("NightLightSwitch", "夜灯", capabilities.CAP_NIGHT_LIGHT),
         ):
-            if has_property(device, identifier):
+            if has_property(device, identifier) and capabilities.supported(
+                device, capability
+            ):
                 yield HotataOnOffLight(coordinator, device, identifier, name)
 
 

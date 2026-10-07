@@ -44,6 +44,8 @@ from .const import (
 )
 from .capabilities import (
     CAP_AIR_DRYING,
+    CAP_CCT_LIGHT,
+    CAP_DOUBLE_POLE,
     CAP_DISINFECTION,
     CAP_DRYING,
     CAP_IONS,
@@ -51,7 +53,9 @@ from .capabilities import (
     resolve,
 )
 from .coordinator import HotataCoordinator
+from .tsl import enum_display
 from .entity import (
+    remove_stale_entity,
     HotataEntity,
     async_setup_dynamic_entities,
     entity_identity,
@@ -106,12 +110,11 @@ def _sensor(
 
 
 SENSORS: tuple[HotataSensorDescription, ...] = (
-    _sensor(
-        "Position",
-        "衣杆位置",
-        icon="mdi:arrow-up-down",
-        value_map={0: "无此功能", 1: "顶部", 2: "中间", 3: "底部"},
-    ),
+    # No value_map: "Position" means different things per product line — an
+    # enum of stopping points (0 = 无此功能) on one airer, a height percentage
+    # 0-255 on another (where 0 is a healthy "rail at the top"). The device's
+    # own TSL declaration decides, see HotataPropertySensor.native_value.
+    _sensor("Position", "衣杆位置", icon="mdi:arrow-up-down"),
     _sensor(
         "DeviceModelType",
         "机型功能配置",
@@ -225,13 +228,13 @@ SENSORS: tuple[HotataSensorDescription, ...] = (
         "ModelFunctionList", "功能列表", diagnostic=True, requires_report=True
     ),
     _sensor("CurrentPositionPoint", "当前位置点"),
-    _sensor("SlavePosition", "副杆位置"),
+    _sensor("SlavePosition", "副杆位置", capability=CAP_DOUBLE_POLE),
     _sensor("BestPickUpPosition", "最佳取衣位置"),
     _sensor("BestSunCurePosition", "最佳晾晒位置"),
     _sensor("ClothesWeight", "衣物重量"),
     _sensor("DryingMode", "烘干模式"),
     _sensor("LightMode", "照明模式"),
-    _sensor("DayLightColour", "日光颜色"),
+    _sensor("DayLightColour", "日光颜色", capability=CAP_CCT_LIGHT),
     _sensor("RiseTime", "上升时间", unit=UnitOfTime.SECONDS),
     _sensor("FallTime", "下降时间", unit=UnitOfTime.SECONDS),
     _sensor("McuHardwareVersion", "MCU 硬件版本", diagnostic=True),
@@ -298,6 +301,16 @@ def _entities(coordinator: HotataCoordinator, device):
             # TSL and the report are product-line templates, so neither decides
             # on its own. Unknown capabilities are created, not guessed away.
             capabilities = resolve(device)
+            if capabilities is None and not device.properties:
+                # No report yet — see _airer_model_supported in switch.py: the
+                # report that is still on its way decides, so wait for it
+                # rather than creating a sensor that can never be withdrawn.
+                _LOGGER.debug(
+                    "Skipping sensor %s: device %s has reported nothing yet",
+                    description.key,
+                    device.device_name or device.iot_id,
+                )
+                continue
             if capabilities is not None and not capabilities.has(
                 description.capability
             ):
@@ -305,6 +318,9 @@ def _entities(coordinator: HotataCoordinator, device):
                     "Skipping sensor %s: %s says the device lacks it",
                     description.key,
                     capabilities.source,
+                )
+                remove_stale_entity(
+                    coordinator.hass, device, "sensor", description.key
                 )
                 continue
         yield HotataPropertySensor(coordinator, device, description)
@@ -339,14 +355,37 @@ class HotataPropertySensor(HotataEntity, SensorEntity):
 
     @property
     def native_value(self) -> Any:
-        value = self.property_value(self.entity_description.key)
+        """Render the reported value the way this device's TSL declares it.
+
+        The device's own declaration wins over the description's map, because
+        the same identifier can be an enum on one product line and a number on
+        another — see tsl.enum_display(). The hard-coded map stays as the
+        fallback for declarations that carry no enum.
+        """
+        key = self.entity_description.key
+        value = self.property_value(key)
+        if value is None:
+            return None
+        # A curated map means we are translating a numeric code we own the
+        # wording for (DeviceModelType, Brand); anything else is rendered from
+        # the device's own TSL declaration.
         value_map = self.entity_description.value_map
-        if value_map is None:
-            return value
-        try:
-            return value_map.get(int(value), str(value))
-        except (TypeError, ValueError):
-            return value
+        if value_map is not None:
+            try:
+                return value_map.get(int(value), str(value))
+            except (TypeError, ValueError):
+                return value
+        display = enum_display(self.current_device, key)
+        if display:
+            mapped = display.get(value)
+            if mapped is None:
+                try:
+                    mapped = display.get(int(value))
+                except (TypeError, ValueError):
+                    mapped = None
+            if mapped is not None:
+                return mapped
+        return value
 
 
 class HotataIntegrationStatusSensor(HotataEntity, SensorEntity):

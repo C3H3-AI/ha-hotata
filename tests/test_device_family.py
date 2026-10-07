@@ -124,6 +124,7 @@ def make_device(properties, product_key, tsl_ids=()):
 class FakeCoordinator:
     def __init__(self, device):
         self.data = {device.iot_id: device}
+        self.hass = None
 
 
 def switch_keys(device):

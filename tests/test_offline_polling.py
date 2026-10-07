@@ -1,10 +1,19 @@
-"""Offline-aware polling: an offline device is probed, never property-read.
+"""Offline-aware polling: probe first, never re-read a known-offline device.
 
 Covers the behaviour added on top of the fast/slow dynamic interval:
   - connectivity is read before properties, so a device that is down is
     detected without first wasting a property read on it;
-  - an offline device gets get_online only — no get_properties, no
-    get_latest_event, no get_thing_model;
+  - WARM-UP: a device we have never read (no thing model, no properties) is
+    polled fully even while offline, because the first poll is what tells the
+    integration what the device is. Measured live: a device the cloud reports
+    as offline (status 3) still answers /thing/properties/get with its full
+    shadow — DeviceModelType included — and /thing/tsl/get with the whole
+    declaration. Skipping those leaves has_property() empty, no entities are
+    created for that device, and automations lose their entity ids on restart
+    (seen on the production instance, 2026-10-07).
+  - a device that is offline AND already known (thing model cached, properties
+    present) gets get_online only — no get_properties, no get_latest_event, no
+    get_thing_model;
   - the coordinator drops to the offline interval (30s) while one is down,
     and returns to the normal fast/slow choice once it answers again;
   - a mixed fleet keeps polling its online members normally.
@@ -130,7 +139,8 @@ class FakeAccount:
         pass
 
 
-def make_coordinator(devices, online_map=None, fail_online=None):
+def make_coordinator(devices, online_map=None, fail_online=None, warm=False):
+    """Build a coordinator. ``warm=True`` seeds the state a first poll leaves."""
     api = FakeApi(devices, online_map, fail_online)
     account = FakeAccount(api)
     co = HotataCoordinator.__new__(HotataCoordinator)
@@ -142,18 +152,56 @@ def make_coordinator(devices, online_map=None, fail_online=None):
     co.data = None
     co.update_interval = timedelta(seconds=const.POLL_INTERVAL_SLOW)
     co._listeners = set()
+    if warm:
+        # Mirror the state a successful first poll leaves behind: the TSL cache
+        # is populated and the coordinator still holds the previous device map
+        # (HA sets ``self.data`` from the return value of every update).
+        for dev in devices:
+            co.thing_models[dev.product_key or dev.iot_id] = {
+                "properties": [{"identifier": "MotorControlMode"}]
+            }
+        co.data = {dev.iot_id: dev for dev in devices}
     return co, api
 
 
-async def test_offline_device_is_probed_but_not_property_read():
-    """The core requirement: offline -> get_online only."""
+async def test_warm_offline_device_is_probed_but_not_property_read():
+    """Steady state: an offline device we already know -> get_online only."""
     devs = [device("d1")]
+    co, api = make_coordinator(devs, online_map={"d1": False}, warm=True)
+    data = await co._async_update_data()
+    R.check("warm offline: get_online called", len(api.calls_for("get_online", "d1")), 1)
+    R.check("warm offline: no get_properties", len(api.calls_for("get_properties")), 0)
+    R.check("warm offline: no thing model read", len(api.calls_for("get_thing_model")), 0)
+    R.check("warm offline: no event read", len(api.calls_for("get_latest_event")), 0)
+    R.check("warm offline: cached thing model still attached",
+            bool(data["d1"].thing_model.get("properties")), True)
+
+
+async def test_cold_offline_device_is_warmed_up():
+    """First poll after a restart: a cold device is read even while offline.
+
+    This is the regression the production instance hit on 2026-10-07: without
+    the warm-up, the device had no TSL and no properties, has_property() was
+    false for every key, and all of its entities disappeared.
+    """
+    devs = [device("d1")]
+    devs[0].properties = {}          # fresh start: nothing read yet
     co, api = make_coordinator(devs, online_map={"d1": False})
+    data = await co._async_update_data()
+    R.check("cold offline: probed", len(api.calls_for("get_online", "d1")), 1)
+    R.check("cold offline: properties read", len(api.calls_for("get_properties", "d1")), 1)
+    R.check("cold offline: thing model read", len(api.calls_for("get_thing_model", "d1")), 1)
+    R.check("cold offline: properties populated",
+            bool(data["d1"].properties), True)
+
+
+async def test_warm_offline_device_without_thing_model_is_still_warmed():
+    """Missing TSL alone is enough to justify the read, even with properties."""
+    devs = [device("d1")]
+    co, api = make_coordinator(devs, online_map={"d1": False})   # cold TSL cache
     await co._async_update_data()
-    R.check("offline: get_online called", len(api.calls_for("get_online", "d1")), 1)
-    R.check("offline: no get_properties", len(api.calls_for("get_properties")), 0)
-    R.check("offline: no thing model", len(api.calls_for("get_thing_model")), 0)
-    R.check("offline: no event read", len(api.calls_for("get_latest_event")), 0)
+    R.check("no TSL cached: properties read", len(api.calls_for("get_properties", "d1")), 1)
+    R.check("no TSL cached: thing model read", len(api.calls_for("get_thing_model", "d1")), 1)
 
 
 async def test_online_device_is_fully_polled():
@@ -223,7 +271,7 @@ async def test_recovery_into_active_window_goes_fast():
 async def test_mixed_fleet_only_skips_the_offline_device():
     """Per-device split: the online member keeps its properties fresh."""
     devs = [device("up"), device("down")]
-    co, api = make_coordinator(devs, online_map={"up": True, "down": False})
+    co, api = make_coordinator(devs, online_map={"up": True, "down": False}, warm=True)
     await co._async_update_data()
     R.check("online member polled", len(api.calls_for("get_properties", "up")), 1)
     R.check("offline member skipped", len(api.calls_for("get_properties", "down")), 0)
@@ -242,7 +290,7 @@ async def test_offline_device_keeps_last_known_properties():
     """Skipping must not blank the device: entities decide availability."""
     devs = [device("d1")]
     devs[0].properties = {"MotorControlMode": 1}
-    co, api = make_coordinator(devs, online_map={"d1": False})
+    co, api = make_coordinator(devs, online_map={"d1": False}, warm=True)
     data = await co._async_update_data()
     R.check("properties preserved", data["d1"].properties, {"MotorControlMode": 1})
     R.check("online flag false", data["d1"].online, False)
@@ -267,10 +315,10 @@ async def test_unknown_status_keeps_normal_cadence():
             const.POLL_INTERVAL_SLOW)
 
 
-async def test_all_offline_still_issues_only_probes():
+async def test_warm_all_offline_still_issues_only_probes():
     devs = [device("a"), device("b"), device("c")]
     co, api = make_coordinator(
-        devs, online_map={"a": False, "b": False, "c": False}
+        devs, online_map={"a": False, "b": False, "c": False}, warm=True
     )
     await co._async_update_data()
     R.check("no property reads at all", len(api.calls_for("get_properties")), 0)

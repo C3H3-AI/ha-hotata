@@ -18,6 +18,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later
 
+from . import capabilities
 from .const import (
     ADVANCED_AIRER_PRODUCT_KEYS,
     CURTAIN_V1_PRODUCT_KEYS,
@@ -73,20 +74,79 @@ def _covers_for_device(
     # Main rail: this project's cover with time-based position simulation.
     if has_property(device, "MotorControlMode"):
         yield HotataAirerCover(coordinator, device)
-    # Additional rails on feature-rich airers (A/B pole models).
+    # Additional rails. The product-line TSL declares the A/B pole properties
+    # on every model of the family, but only a device whose capability list
+    # sets DOUBLE_POLE actually has a second rail — a D-3072S declares both
+    # properties, never reports either, and the vendor app hides the controls
+    # (its bit 24 is 0).
     if device.product_key in ADVANCED_AIRER_PRODUCT_KEYS:
         for identifier, name in (
             ("ApoleMotorControlMode", "A 杆"),
             ("BpoleMotorControlMode", "B 杆"),
         ):
-            if has_property(device, identifier):
+            if has_property(device, identifier) and capabilities.supported(
+                device, capabilities.CAP_DOUBLE_POLE
+            ):
                 yield HotataRailCover(coordinator, device, identifier, name)
 
 
-class HotataRailCover(HotataEntity, CoverEntity):
+class _DirectionMixin:
+    """Client-side travel direction, shared by both rail entities.
+
+    Directions, in device terms (issue #15, decided 2026-10-07):
+
+        device 100 = rail raised (收起)      device 0 = rail lowered (放下)
+        default    : open (展开/打开) lowers the rail -> 100 % = rail down
+        行程反转   : open raises the rail            -> 100 % = rail up
+
+    The entity uses ``device_class: awning`` on purpose: Home Assistant draws
+    its cover buttons from the device class, and only the awning/curtain family
+    gets 「展开 / 合拢」 arrows instead of a hard-wired ⬆️=打开 / ⬇️=关闭. That
+    keeps the icon, the button label, the reported percentage and the physical
+    movement consistent with each other (see the frontend's cover icon
+    function), which the shade class cannot do.
+
+    Internal coordinates stay in DEVICE terms and only the Home Assistant
+    facing values and commands are translated, so the position simulation, the
+    auto-stop timer and the descent-time number are untouched.
+    """
+
+    @property
+    def _reversed(self) -> bool:
+        """True when 行程反转 is on: opening raises the rail instead of lowering it."""
+        return bool(self.coordinator.runtime(self.device.iot_id).invert_direction)
+
+    def _ha_position(self, device_position: int) -> int:
+        """Device coordinate -> the percentage Home Assistant should show.
+
+        Device side 100 is "rail raised". Home Assistant side 100 is "open",
+        which for an airer means the rail is lowered for drying, so the two are
+        mirrored — unless the direction was reversed to 打开=收起.
+        """
+        return device_position if self._reversed else 100 - device_position
+
+    def _device_position(self, ha_position: int) -> int:
+        """Home Assistant percentage -> the device coordinate to aim for."""
+        return ha_position if self._reversed else 100 - ha_position
+
+    @property
+    def _open_command(self) -> int:
+        """Device command behind Home Assistant's "open" (展开/放下)."""
+        return MOTOR_OPEN if self._reversed else MOTOR_CLOSE
+
+    @property
+    def _close_command(self) -> int:
+        return MOTOR_CLOSE if self._reversed else MOTOR_OPEN
+
+
+class HotataRailCover(_DirectionMixin, HotataEntity, CoverEntity):
     """Raise, lower, or stop one clothes-airer rail (no position)."""
 
-    _attr_device_class = CoverDeviceClass.SHADE
+    _attr_device_class = CoverDeviceClass.AWNING
+    # The device class only drives the button glyphs (see _DirectionMixin);
+    # the icon is what identifies the thing on a dashboard, and an airer is
+    # not an awning.
+    _attr_icon = "mdi:hanger"
     # These rails have no position feedback, so is_closed can only be unknown.
     # CoverEntity annotates _attr_is_closed without a default (unlike
     # _attr_is_closing / _attr_is_opening), so omitting it here makes the base
@@ -108,23 +168,23 @@ class HotataRailCover(HotataEntity, CoverEntity):
 
     @property
     def is_opening(self) -> bool:
-        return self.property_value(self.identifier) == MOTOR_OPEN
+        return self.property_value(self.identifier) == self._open_command
 
     @property
     def is_closing(self) -> bool:
-        return self.property_value(self.identifier) == MOTOR_CLOSE
+        return self.property_value(self.identifier) == self._close_command
 
     async def async_open_cover(self, **kwargs: Any) -> None:
-        await self.async_set_property(self.identifier, MOTOR_OPEN)
+        await self.async_set_property(self.identifier, self._open_command)
 
     async def async_close_cover(self, **kwargs: Any) -> None:
-        await self.async_set_property(self.identifier, MOTOR_CLOSE)
+        await self.async_set_property(self.identifier, self._close_command)
 
     async def async_stop_cover(self, **kwargs: Any) -> None:
         await self.async_set_property(self.identifier, MOTOR_STOP)
 
 
-class HotataAirerCover(HotataEntity, CoverEntity):
+class HotataAirerCover(_DirectionMixin, HotataEntity, CoverEntity):
     """Main airer rail with time-based position simulation and auto-stop.
 
     按下降键 → 运行 descent_time 秒 → 自动停止在目标位置。
@@ -132,7 +192,13 @@ class HotataAirerCover(HotataEntity, CoverEntity):
     设备没有真实位置传感器（Position 只是粗粒度枚举），位置由时间模拟。
     """
 
-    _attr_device_class = CoverDeviceClass.SHADE
+    _attr_device_class = CoverDeviceClass.AWNING
+    # The device class only drives the button glyphs (see _DirectionMixin).
+    # The identity — a clothes airer, not an awning — comes from this
+    # translation key plus the integration's own icons.json, which is what lets
+    # the icon differ per state (衣架 / 挂着衣服 / 正在升 / 正在降).
+    # NOTE: no _attr_icon here on purpose — a hard-coded icon would win over
+    # icons.json and freeze the icon.
     _attr_translation_key = "cover"
     _attr_supported_features = (
         CoverEntityFeature.OPEN
@@ -161,21 +227,27 @@ class HotataAirerCover(HotataEntity, CoverEntity):
 
     @property
     def current_cover_position(self) -> int | None:
-        """Return current position."""
-        return self._position
+        """Return current position, in the direction the user asked for."""
+        if self._position is None:
+            return None
+        return self._ha_position(self._position)
 
     @property
     def is_opening(self) -> bool:
-        return self.property_value("MotorControlMode") == MOTOR_OPEN
+        return self.property_value("MotorControlMode") == self._open_command
 
     @property
     def is_closing(self) -> bool:
-        return self.property_value("MotorControlMode") == MOTOR_CLOSE
+        return self.property_value("MotorControlMode") == self._close_command
 
     @property
     def is_closed(self) -> bool | None:
-        """Return True if the cover is at the lowest position."""
-        return self._position == 0
+        """True when the cover is at the end of its travel that reads "closed".
+
+        Device-side that is 0 (rail lowered); with the direction reversed it is
+        100 (rail raised), which is what "closed" means to that installation.
+        """
+        return self._position == self._device_position(0)
 
     def _cancel_stop_timer(self) -> None:
         self.runtime.target_position = None
@@ -245,8 +317,10 @@ class HotataAirerCover(HotataEntity, CoverEntity):
             self._position = runtime.simulated_position
         self.async_write_ha_state()
 
-    async def async_open_cover(self, **kwargs: Any) -> None:
-        """Open the cover (上升/收起)."""
+    # ---- device primitives (device coordinates: 100 = rail at the top) ----
+
+    async def _async_rise(self) -> None:
+        """Raise the rail to the top (device command 上升)."""
         self._cancel_stop_timer()
         try:
             await self.async_set_property("MotorControlMode", MOTOR_OPEN)
@@ -261,8 +335,8 @@ class HotataAirerCover(HotataEntity, CoverEntity):
         # updated, so the next coordinator callback sees them in agreement.
         self.async_write_ha_state()
 
-    async def async_close_cover(self, **kwargs: Any) -> None:
-        """Close the cover (下降/展开), auto-stopping at the bottom."""
+    async def _async_descend(self, target: int) -> None:
+        """Lower the rail to ``target`` (device coordinate), auto-stopping."""
         self._cancel_stop_timer()
         try:
             await self.async_set_property("MotorControlMode", MOTOR_CLOSE)
@@ -270,20 +344,36 @@ class HotataAirerCover(HotataEntity, CoverEntity):
             _LOGGER.error("Close cover failed: %s", err)
             return
         runtime = self.runtime
-        runtime.target_position = 0
+        runtime.target_position = target
         runtime.closing_start = time.time()
         current = self._position if self._position is not None else 100
-        time_needed = max(1, current / 100 * runtime.descent_time)
+        time_needed = max(1, (current - target) / 100 * runtime.descent_time)
         self._stop_timer = async_call_later(
             self.hass, time_needed, self._async_auto_stop_cover
         )
         _LOGGER.debug(
-            "Cover descending from %d%%, auto-stop in %.1f seconds",
-            current,
+            "Cover descending to %d%%, auto-stop in %.1f seconds",
+            target,
             time_needed,
         )
         # Timer armed and runtime fields written: make is_closing visible now.
         self.async_write_ha_state()
+
+    # ---- Home Assistant surface (translated when the direction is reversed) --
+
+    async def async_open_cover(self, **kwargs: Any) -> None:
+        """Open (展开): lower the rail for drying, 上升 once reversed."""
+        if self._reversed:
+            await self._async_rise()
+        else:
+            await self._async_descend(0)
+
+    async def async_close_cover(self, **kwargs: Any) -> None:
+        """Close (收起): raise the rail, 下降 once reversed."""
+        if self._reversed:
+            await self._async_descend(0)
+        else:
+            await self._async_rise()
 
     async def async_stop_cover(self, **kwargs: Any) -> None:
         """Stop the cover (中途停止)."""
@@ -305,40 +395,23 @@ class HotataAirerCover(HotataEntity, CoverEntity):
         self.async_write_ha_state()
 
     async def async_set_cover_position(self, **kwargs: Any) -> None:
-        """Set the cover to a specific position."""
-        target = kwargs.get(ATTR_POSITION, 100)
+        """Set the cover to a specific position.
+
+        The percentage arrives in Home Assistant terms and is translated once,
+        here; the two branches below are device-coordinate moves, so they use
+        the device commands rather than the (possibly reversed) HA ones.
+        """
+        target = self._device_position(int(kwargs.get(ATTR_POSITION, 100)))
         current = self._position if self._position is not None else 100
         if target == current:
             _LOGGER.debug(
                 "Cover already at position %d%%, skipping command", target
             )
             return
-        self._cancel_stop_timer()
         if target > current:
-            await self.async_open_cover()
-            return
-        try:
-            await self.async_set_property("MotorControlMode", MOTOR_CLOSE)
-        except HotataError as err:
-            _LOGGER.error("Set cover position failed: %s", err)
-            return
-        runtime = self.runtime
-        runtime.target_position = target
-        runtime.closing_start = time.time()
-        time_needed = max(
-            1, (current - target) / 100 * runtime.descent_time
-        )
-        self._stop_timer = async_call_later(
-            self.hass, time_needed, self._async_auto_stop_cover
-        )
-        _LOGGER.debug(
-            "Cover descending to %d%%, auto-stop in %.1f seconds",
-            target,
-            time_needed,
-        )
-        # Timer armed and runtime fields written: make is_closing visible now.
-        # The ascending branch above returns early — async_open_cover writes.
-        self.async_write_ha_state()
+            await self._async_rise()
+        else:
+            await self._async_descend(target)
 
 
 # ---- curtain machines ----

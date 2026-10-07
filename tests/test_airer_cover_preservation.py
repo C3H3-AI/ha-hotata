@@ -1,13 +1,19 @@
 """Preservation baseline: non-bug inputs must behave identically after PR #14.
 
 Every assertion here describes behaviour that was already correct before the
-fix. The point is to prove the position work did not change command values,
-timer durations or the coordinator-driven runtime convergence for inputs that
-never hit the `0`-is-falsy bug.
+position work. The point is to prove the simulation internals — command values,
+timer durations, coordinator convergence — still behave, now expressed in the
+current direction mapping (device_class awning, 2026-10-07):
+
+    device 100 = rail raised = HA 0 % (closed)     open (展开) descends
+    device 0   = rail lowered = HA 100 % (open)    close (收起) rises, instantly
+
+``build(position=…)`` takes the DEVICE coordinate.
 
 Run from anywhere:  python3 tests/test_airer_cover_preservation.py
 """
 import asyncio
+import json
 import sys
 import time
 from pathlib import Path
@@ -28,39 +34,48 @@ R = Results()
 MODE = "MotorControlMode"
 
 
-async def test_open_from_midway():
+async def test_open_from_midway_descends():
     reset_timers()
     _, ent = build(position=40)
     await ent.async_open_cover()
-    R.check("open from 40", ent.commands, [(MODE, MOTOR_OPEN)])
-    R.check("open from 40 -> 100", ent._position, 100)
+    R.check("open from device 40 emits MOTOR_CLOSE",
+            ent.commands, [(MODE, MOTOR_CLOSE)])
 
 
-async def test_close_from_top_uses_full_descent():
+async def test_close_from_the_bottom_rises_instantly():
+    reset_timers()
+    _, ent = build(position=0, descent_time=40)
+    await ent.async_close_cover()
+    R.check("close from 0 emits MOTOR_OPEN", ent.commands, [(MODE, MOTOR_OPEN)])
+    R.check("close from 0 arms no timer", live_timers(), [])
+    R.check("close from 0 -> 0 %", ent.current_cover_position, 0)
+
+
+async def test_open_from_top_uses_full_descent():
     reset_timers()
     co, ent = build(position=100, descent_time=40)
-    await ent.async_close_cover()
+    await ent.async_open_cover()
     timers = live_timers()
-    R.check("close from 100 emits MOTOR_CLOSE", ent.commands, [(MODE, MOTOR_CLOSE)])
-    R.check("close from 100 full descent", timers[0]["delay"] if timers else None, 40)
-    R.check("close from 100 targets bottom", co._runtime.target_position, 0)
-    R.check("close from 100 starts descent clock",
+    R.check("open from 100 emits MOTOR_CLOSE", ent.commands, [(MODE, MOTOR_CLOSE)])
+    R.check("open from 100 full descent", timers[0]["delay"] if timers else None, 40)
+    R.check("open from 100 targets the bottom", co._runtime.target_position, 0)
+    R.check("open from 100 starts descent clock",
             co._runtime.closing_start is not None, True)
 
 
-async def test_close_from_midway_is_proportional():
+async def test_open_from_midway_is_proportional():
     reset_timers()
     _, ent = build(position=50, descent_time=40)
-    await ent.async_close_cover()
+    await ent.async_open_cover()
     timers = live_timers()
-    R.check("close from 50 half descent",
+    R.check("open from 50 half descent",
             timers[0]["delay"] if timers else None, 20.0)
 
 
 async def test_stop_midway_freezes_estimate():
     reset_timers()
     co, ent = build(position=100, descent_time=40)
-    await ent.async_close_cover()
+    await ent.async_open_cover()
     # Pretend 10s of the 40s descent elapsed.
     co._runtime.closing_start = time.time() - 10
     await ent.async_stop_cover()
@@ -83,19 +98,19 @@ async def test_stop_while_idle_is_harmless():
 async def test_set_position_below_current_descends_proportionally():
     reset_timers()
     co, ent = build(position=100, descent_time=40)
-    await ent.async_set_cover_position(position=20)
+    await ent.async_set_cover_position(position=80)          # HA 80 % -> device 20
     timers = live_timers()
-    R.check("100->20 emits MOTOR_CLOSE", ent.commands, [(MODE, MOTOR_CLOSE)])
-    R.check("100->20 timer", timers[0]["delay"] if timers else None, 32.0)
-    R.check("100->20 targets 20", co._runtime.target_position, 20)
+    R.check("0->80 emits MOTOR_CLOSE", ent.commands, [(MODE, MOTOR_CLOSE)])
+    R.check("0->80 timer", timers[0]["delay"] if timers else None, 32.0)
+    R.check("0->80 targets device 20", co._runtime.target_position, 20)
 
 
-async def test_set_position_above_current_opens():
+async def test_set_position_towards_the_top_rises():
     reset_timers()
     _, ent = build(position=20)
-    await ent.async_set_cover_position(position=80)
-    R.check("20->80 emits MOTOR_OPEN", ent.commands, [(MODE, MOTOR_OPEN)])
-    R.check("20->80 -> 100", ent._position, 100)
+    await ent.async_set_cover_position(position=20)          # HA 20 % -> device 80
+    R.check("100->20 emits MOTOR_OPEN", ent.commands, [(MODE, MOTOR_OPEN)])
+    R.check("100->20 ends at 0 %", ent.current_cover_position, 0)
 
 
 async def test_coordinator_advances_descent_estimate():
@@ -148,20 +163,20 @@ async def test_coordinator_converges_when_idle():
 async def test_cancel_stop_timer_then_open_leaves_no_stray_descent():
     reset_timers()
     co, ent = build(position=100, descent_time=40)
-    await ent.async_close_cover()
+    await ent.async_open_cover()
     armed = live_timers()
     R.check("descent armed", len(armed), 1)
-    await ent.async_open_cover()
-    R.check("open cancels the descent timer", armed[0]["cancelled"], True)
-    R.check("open clears the target", co._runtime.target_position, None)
-    R.check("open clears closing_start", co._runtime.closing_start, None)
+    await ent.async_close_cover()
+    R.check("close cancels the descent timer", armed[0]["cancelled"], True)
+    R.check("close clears the target", co._runtime.target_position, None)
+    R.check("close clears closing_start", co._runtime.closing_start, None)
 
 
 async def test_auto_stop_retries_on_failure():
     """A failed stop must re-arm a retry rather than free the motor."""
     reset_timers()
     co, ent = build(position=100, descent_time=40)
-    await ent.async_close_cover()
+    await ent.async_open_cover()
     ent.fail_on = {MODE: __import__("hotata.cover", fromlist=["HotataError"]).HotataError("x")}
     before = len(live_timers())
     await ent._async_auto_stop_cover(None)
@@ -169,6 +184,51 @@ async def test_auto_stop_retries_on_failure():
     R.check("retry timer armed", len(after), before + 1)
     R.check("retry delay is 15s", after[-1]["delay"], 15)
     R.check("position untouched on failure", ent._position, 100)
+
+
+async def test_airer_cover_presents_itself_as_an_airer():
+    """device_class drives the buttons; the icon says what the thing is.
+
+    ``awning`` is the closest class that gets 展开/合拢 arrows instead of a
+    hard-wired ⬆️=打开, but an airer is not an awning, so the icon is a hanger
+    and the curtain family keeps its own look.
+    """
+    from pathlib import Path
+    from cover_harness import HotataDevice, FakeCoordinator
+    from hotata.cover import HotataAirerCover, HotataRailCover, HotataCurtainV1
+    device = HotataDevice(
+        iot_id="airer1", name="晾衣架", product_key="PK_AIRER",
+        device_name="a", online=True, raw={},
+        properties={"MotorControlMode": 0},
+    )
+    co = FakeCoordinator(device)
+    ent = HotataAirerCover(co, device)
+    R.check("airer cover uses the awning button set",
+            ent._attr_device_class, "awning")
+    R.check("airer cover is keyed so icons.json can style it",
+            ent._attr_translation_key, "cover")
+    R.check("no hard-coded icon: it would beat icons.json",
+            getattr(ent, "_attr_icon", None), None)
+    icons = json.loads(
+        (Path(__file__).resolve().parent.parent
+         / "custom_components" / "hotata" / "icons.json").read_text(encoding="utf-8")
+    )
+    airer_icons = icons["entity"]["cover"]["cover"]
+    R.check("icons.json default is a hanger", airer_icons["default"], "mdi:hanger")
+    R.check("icons.json closed is a hanger", airer_icons["state"]["closed"], "mdi:hanger")
+    R.check("icons.json open shows hanging clothes",
+            airer_icons["state"]["open"], "mdi:tshirt-crew")
+    R.check("icons.json opening lowers",
+            airer_icons["state"]["opening"], "mdi:arrow-down-bold-box")
+    rail = HotataRailCover(co, device, "ApoleMotorControlMode", "A 杆")
+    R.check("rail cover shows a hanger too", rail._attr_icon, "mdi:hanger")
+    curtain = HotataCurtainV1(co, HotataDevice(
+        iot_id="c1", name="窗帘", product_key="CURTAIN_V1", device_name="c",
+        online=True, raw={}, properties={"CurtainPosition": 0},
+    ))
+    R.check("curtain keeps its own class", curtain._attr_device_class, "curtain")
+    R.check("curtain keeps no hanger icon",
+            getattr(curtain, "_attr_icon", None), None)
 
 
 async def test_curtain_v1_untouched():

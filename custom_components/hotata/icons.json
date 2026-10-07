@@ -1,0 +1,16 @@
+{
+  "entity": {
+    "cover": {
+      "cover": {
+        "default": "mdi:hanger",
+        "state": {
+          "closed": "mdi:hanger",
+          "open": "mdi:tshirt-crew",
+          "opening": "mdi:arrow-down-bold-box",
+          "closing": "mdi:arrow-up-bold-box",
+          "unavailable": "mdi:hanger"
+        }
+      }
+    }
+  }
+}

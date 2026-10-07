@@ -36,6 +36,9 @@ CAP_NATURAL_WIND = "natural_wind"
 CAP_DOUBLE_POLE = "double_pole"
 CAP_LIGHT_MODE = "light_mode"
 CAP_DRYING_MODE = "drying_mode"
+CAP_VOICE = "voice"
+CAP_SOLAR_TRACE = "solar_trace"
+CAP_SUN_TRACE = "sun_trace"
 
 #: ``FUN_INDEX`` from the mini-program: capability name -> position counted
 #: from the right of the ModelFunctionList string.
@@ -49,17 +52,17 @@ FUN_INDEX: dict[str, int] = {
     "route_diy2": 15,
     "sensor_night_light": 17,
     "sensor_light": 18,
-    "voice": 20,
+    CAP_VOICE: 20,
     CAP_NIGHT_LIGHT: 22,
     CAP_CCT_LIGHT: 23,
     CAP_DOUBLE_POLE: 24,
-    "solar_trace": 25,
+    CAP_SOLAR_TRACE: 25,
     "t_pole": 26,
     CAP_LIGHT_MODE: 27,
     CAP_DRYING_MODE: 28,
     "voice_broadcast": 29,
     CAP_NATURAL_WIND: 30,
-    "sun_trace": 31,
+    CAP_SUN_TRACE: 31,
     "custom_time": 32,
 }
 
@@ -167,3 +170,18 @@ def resolve(device: Any) -> AirerCapabilities | None:
     if capabilities is not None:
         return capabilities
     return from_model_type(_reported(device, "DeviceModelType"))
+
+
+def supported(device: Any, capability: str | None) -> bool:
+    """Return whether the device may be given an entity for ``capability``.
+
+    ``None`` means "this entity is not capability-gated". A device whose
+    capabilities cannot be resolved — no ModelFunctionList, no usable
+    DeviceModelType, or simply offline on a cold start — is allowed the entity,
+    so a real function is never hidden. Only a device that states its capability
+    list is trusted to exclude one.
+    """
+    if capability is None:
+        return True
+    resolved = resolve(device)
+    return True if resolved is None else resolved.has(capability)

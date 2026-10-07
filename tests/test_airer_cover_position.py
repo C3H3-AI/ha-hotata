@@ -1,9 +1,20 @@
-"""Regression tests for issue #13: airer must rise from the closed state.
+"""Regression tests for issue #13: an airer request must always reach the motor.
 
-Root cause guarded here: `self._position or 100` treated the legitimate closed
+Root cause guarded here: `self._position or 100` treated the legitimate device
 position 0 as falsy and substituted 100, so a HomeKit "open" tap
 (async_set_cover_position(position=100)) hit `target == current` and was
 dropped silently — no motor command, no log.
+
+Direction, as of the 2026-10-07 decision (issue #15): the cover is
+``device_class: awning`` and 打开 (open) LOWERS the rail, so
+
+    Home Assistant 0 %   = rail raised (device 100)   = 已关闭
+    Home Assistant 100 % = rail lowered (device 0)    = 已打开
+
+Open is therefore the *timed* movement (the rail descends and auto-stops);
+close is the instant one. ``build(position=…)`` still takes the DEVICE
+coordinate, and assertions prefer ``current_cover_position`` (the percentage
+Home Assistant shows) so the intent stays readable.
 
 Every assertion in this file fails on the pre-fix code and passes after it,
 except where a case is explicitly marked as a preservation guard.
@@ -33,75 +44,94 @@ R = Results()
 MODE = "MotorControlMode"
 
 
-async def test_closed_cover_rises_on_open_request():
-    """The issue: position 0 + set_cover_position(100) must emit MOTOR_OPEN."""
+async def test_closed_cover_opens_on_open_request():
+    """The issue: an open request from the closed state must reach the motor.
+
+    Closed is the rail at the top (device 100); opening lowers it, so the
+    command is MOTOR_CLOSE and the descent timer is armed.
+    """
     reset_timers()
-    _, ent = build(position=0)
+    _, ent = build(position=100)
     await ent.async_set_cover_position(position=100)
-    R.check("closed->100 emits MOTOR_OPEN", ent.commands, [(MODE, MOTOR_OPEN)])
-    R.check("closed->100 leaves position at top", ent._position, 100)
-    R.check("closed->100 arms no descent timer", live_timers(), [])
+    R.check("closed->100 emits MOTOR_CLOSE", ent.commands, [(MODE, MOTOR_CLOSE)])
+    R.check("closed->100 arms one descent timer", len(live_timers()), 1)
+    await run_auto_stop(ent)
+    R.check("closed->100 reads 100 % once arrived",
+            ent.current_cover_position, 100)
 
 
-async def test_closed_cover_rises_via_open_cover():
+async def test_closed_cover_opens_via_open_cover():
     """HomeKit icon tap can also route straight to async_open_cover."""
     reset_timers()
-    _, ent = build(position=0)
+    _, ent = build(position=100)
     await ent.async_open_cover()
-    R.check("open_cover from 0 emits MOTOR_OPEN", ent.commands, [(MODE, MOTOR_OPEN)])
-    R.check("open_cover from 0 sets position 100", ent._position, 100)
+    R.check("open_cover from closed emits MOTOR_CLOSE",
+            ent.commands, [(MODE, MOTOR_CLOSE)])
+    await run_auto_stop(ent)
+    R.check("open_cover from closed ends at 100 %",
+            ent.current_cover_position, 100)
 
 
 async def test_closed_cover_does_not_emit_reverse_command():
-    """Pre-fix, position 0 made `current` 100, so an open request closed it."""
+    """Pre-fix, a falsy position made `current` 100, so an open request reversed."""
     reset_timers()
-    _, ent = build(position=0)
+    _, ent = build(position=100)
     await ent.async_set_cover_position(position=100)
     emitted = [v for _, v in ent.commands]
-    R.check("never emits MOTOR_CLOSE when asked to open", MOTOR_CLOSE in emitted, False)
+    R.check("never emits MOTOR_OPEN when asked to open", MOTOR_OPEN in emitted, False)
 
 
 async def test_homekit_close_from_closed_is_idempotent():
     """HomeKit close sends position=0; on a closed cover that is a no-op."""
     reset_timers()
-    _, ent = build(position=0)
+    _, ent = build(position=100)
     await ent.async_set_cover_position(position=0)
     R.check("closed->0 emits nothing", ent.commands, [])
     R.check("closed->0 arms no timer", live_timers(), [])
-    R.check("closed->0 keeps position 0", ent._position, 0)
+    R.check("closed->0 keeps position 0", ent.current_cover_position, 0)
 
 
-async def test_drag_up_from_bottom_moves_up_not_down():
+async def test_drag_from_the_bottom_moves_the_right_way():
     """Issue #13 step 4: dragging to a position must move in the right
-    direction. Pre-fix, 0 -> 60 emitted MOTOR_CLOSE."""
+    direction. Device 0 (fully open) dragged to 60 % must rise, not descend."""
     reset_timers()
     _, ent = build(position=0)
     await ent.async_set_cover_position(position=60)
-    R.check("drag 0->60 emits MOTOR_OPEN", ent.commands, [(MODE, MOTOR_OPEN)])
-    R.check("drag 0->60 leaves no pending descent", live_timers(), [])
+    R.check("drag 100->60 emits MOTOR_OPEN", ent.commands, [(MODE, MOTOR_OPEN)])
+    R.check("drag 100->60 leaves no pending descent", live_timers(), [])
 
 
-async def test_close_from_bottom_uses_minimum_duration():
-    """Pre-fix, `current = self._position or 100` made a close from the bottom
-    wait a full descent_time instead of the 1s minimum."""
+async def test_short_open_uses_minimum_duration():
+    """A sliver of travel must use the 1s minimum, not the full descent_time."""
     reset_timers()
-    co, ent = build(position=0, descent_time=40)
-    await ent.async_close_cover()
+    co, ent = build(position=1, descent_time=40)
+    await ent.async_open_cover()
     timers = live_timers()
-    R.check("close from 0 emits MOTOR_CLOSE", ent.commands, [(MODE, MOTOR_CLOSE)])
-    R.check("close from 0 arms one timer", len(timers), 1)
-    R.check("close from 0 uses 1s minimum", timers[0]["delay"] if timers else None, 1)
+    R.check("open from device 1 emits MOTOR_CLOSE",
+            ent.commands, [(MODE, MOTOR_CLOSE)])
+    R.check("open from device 1 arms one timer", len(timers), 1)
+    R.check("open from device 1 uses 1s minimum",
+            timers[0]["delay"] if timers else None, 1)
 
 
-async def test_set_position_to_bottom_from_bottom_is_minimum_duration():
-    """0 -> 0 is a no-op; but 10 -> 0 must use the short proportional timer."""
+async def test_close_is_instant_because_it_rises():
+    """Closing raises the rail to the top; the simulation stops there at once."""
+    reset_timers()
+    _, ent = build(position=0, descent_time=40)
+    await ent.async_close_cover()
+    R.check("close emits MOTOR_OPEN", ent.commands, [(MODE, MOTOR_OPEN)])
+    R.check("close arms no timer", live_timers(), [])
+    R.check("close reads 0 %", ent.current_cover_position, 0)
+
+
+async def test_set_position_to_the_top_is_a_short_rise():
+    """Sliding to 0 % raises the rail; the move is instant and emits MOTOR_OPEN."""
     reset_timers()
     _, ent = build(position=10, descent_time=40)
     await ent.async_set_cover_position(position=0)
-    timers = live_timers()
-    want = max(1, (10 - 0) / 100 * 40)
-    R.check("10->0 emits MOTOR_CLOSE", ent.commands, [(MODE, MOTOR_CLOSE)])
-    R.check("10->0 timer is proportional", timers[0]["delay"] if timers else None, want)
+    R.check("10->0 emits MOTOR_OPEN", ent.commands, [(MODE, MOTOR_OPEN)])
+    R.check("10->0 arms no timer", live_timers(), [])
+    R.check("10->0 reads 0 %", ent.current_cover_position, 0)
 
 
 async def test_set_position_records_target_for_auto_stop():
@@ -109,11 +139,12 @@ async def test_set_position_records_target_for_auto_stop():
     reset_timers()
     co, ent = build(position=100, descent_time=40)
     await ent.async_set_cover_position(position=25)
-    R.check("100->25 emits MOTOR_CLOSE", ent.commands, [(MODE, MOTOR_CLOSE)])
-    R.check("100->25 stores target", co._runtime.target_position, 25)
+    R.check("0->25 emits MOTOR_CLOSE", ent.commands, [(MODE, MOTOR_CLOSE)])
+    R.check("0->25 stores the device target", co._runtime.target_position, 75)
     await run_auto_stop(ent)
-    R.check("auto-stop lands on target 25", ent._position, 25)
-    R.check("auto-stop syncs simulated position", co._runtime.simulated_position, 25)
+    R.check("auto-stop lands on target 25 %", ent.current_cover_position, 25)
+    R.check("auto-stop syncs simulated position",
+            co._runtime.simulated_position, 75)
 
 
 async def test_auto_stop_without_target_keeps_simulated_position():
@@ -121,8 +152,7 @@ async def test_auto_stop_without_target_keeps_simulated_position():
     the rail to the bottom with a bare `else 0`."""
     reset_timers()
     co, ent = build(position=0, descent_time=40)
-    # Arm a real descent from the bottom (0 -> 30 is a descent in motor terms
-    # only via close; use set_position on a cover parked at the top instead).
+    # Arm a real device descent: park at the top and ask for 30 %.
     ent._position = 100
     co._runtime.simulated_position = 100
     await ent.async_set_cover_position(position=30)
@@ -146,7 +176,9 @@ async def test_state_is_written_on_command_success():
         ("set_position", lambda e: e.async_set_cover_position(position=100)),
     ):
         reset_timers()
-        _, ent = build(position=0 if label != "close" else 100)
+        # Arm a state where the command is not a no-op: open descends from the
+        # top, close rises from the bottom, set_position mirrors open.
+        _, ent = build(position=100 if label in ("open", "set_position") else 0)
         ent.ha_state_writes = 0
         await call(ent)
         R.check(f"{label} writes state once", ent.ha_state_writes, 1)
@@ -155,13 +187,13 @@ async def test_state_is_written_on_command_success():
 async def test_no_state_write_on_skipped_or_failed_command():
     """A dropped (target == current) or failed command must not write state."""
     reset_timers()
-    _, ent = build(position=0)
+    _, ent = build(position=100)                     # already at HA 0 %
     ent.ha_state_writes = 0
     await ent.async_set_cover_position(position=0)   # skipped
     R.check("skipped command writes no state", ent.ha_state_writes, 0)
 
     reset_timers()
-    _, ent = build(position=0, fail_on={MODE: HotataError("cloud down")})
+    _, ent = build(position=100, fail_on={MODE: HotataError("cloud down")})
     ent.ha_state_writes = 0
     await ent.async_open_cover()                     # fails
     R.check("failed command emits nothing", ent.commands, [])
@@ -173,7 +205,7 @@ async def test_skipped_command_is_logged():
     import logging
 
     reset_timers()
-    _, ent = build(position=0)
+    _, ent = build(position=100)
     records = []
 
     class Sink(logging.Handler):
@@ -197,9 +229,9 @@ async def test_no_command_after_lost_broadcast_is_recoverable():
     """A missed coordinator broadcast must not permanently wedge the entity:
     an explicit open request from the closed state still works."""
     reset_timers()
-    co, ent = build(position=0, simulated=100)   # runtime out of sync
+    co, ent = build(position=100, simulated=0)   # runtime out of sync
     await ent.async_set_cover_position(position=100)
-    R.check("recovers and opens", ent.commands, [(MODE, MOTOR_OPEN)])
+    R.check("recovers and opens", ent.commands, [(MODE, MOTOR_CLOSE)])
 
 
 async def main():

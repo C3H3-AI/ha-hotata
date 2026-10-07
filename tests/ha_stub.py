@@ -302,8 +302,17 @@ class _StateWriter:
 cover = mod('homeassistant.components.cover')
 ATTR_POSITION = 'position'
 class CoverDeviceClass:
-    SHADE = 'shade'
+    """Mirrors HA's cover device classes (values are the wire strings)."""
+    AWNING = 'awning'
+    BLIND = 'blind'
     CURTAIN = 'curtain'
+    DAMPER = 'damper'
+    DOOR = 'door'
+    GARAGE = 'garage'
+    GATE = 'gate'
+    SHADE = 'shade'
+    SHUTTER = 'shutter'
+    WINDOW = 'window'
 class CoverEntityFeature:
     """Real HA bit values, so `|` composition matches the integration."""
     OPEN = 1
@@ -381,6 +390,12 @@ class EntityDescription:
     device_class: object = None
     translation_key: str | None = None
     entity_registry_enabled_default: bool = True
+    native_unit_of_measurement: str | None = None
+    unit_of_measurement: str | None = None
+    state_class: object = None
+    entity_category: object = None
+    force_update: bool = False
+    options: object = None
 
 class SwitchEntityDescription(EntityDescription):
     pass
@@ -390,3 +405,103 @@ sw.SwitchDeviceClass = SwitchDeviceClass
 sw.SwitchEntityDescription = SwitchEntityDescription
 sw.SwitchEntity = SwitchEntity
 comp.switch = sw
+
+
+# ---- sensor platform + const names (offline entity-presence tests) ----
+
+cn = mod('homeassistant.const')
+class EntityCategory:
+    DIAGNOSTIC = 'diagnostic'
+    CONFIG = 'config'
+class UnitOfTemperature:
+    CELSIUS = '\u00b0C'
+    FAHRENHEIT = '\u00b0F'
+class UnitOfTime:
+    SECONDS = 's'
+    MINUTES = 'min'
+    HOURS = 'h'
+class UnitOfDensity:
+    MICROGRAMS_PER_CUBIC_METER = '\u00b5g/m\u00b3'
+    MILLIGRAMS_PER_CUBIC_METER = 'mg/m\u00b3'
+cn.EntityCategory = EntityCategory
+cn.PERCENTAGE = '%'
+cn.SIGNAL_STRENGTH_DECIBELS_MILLIWATT = 'dBm'
+cn.UnitOfTemperature = UnitOfTemperature
+cn.UnitOfTime = UnitOfTime
+cn.UnitOfDensity = UnitOfDensity
+cn.CONCENTRATION_MICROGRAMS_PER_CUBIC_METER = (
+    UnitOfDensity.MICROGRAMS_PER_CUBIC_METER
+)
+comp.const = cn
+
+sn = mod('homeassistant.components.sensor')
+class SensorDeviceClass:
+    TEMPERATURE = 'temperature'
+    HUMIDITY = 'humidity'
+    PM25 = 'pm25'
+    SIGNAL_STRENGTH = 'signal_strength'
+    POWER_FACTOR = 'power_factor'
+    BATTERY = 'battery'
+class SensorStateClass:
+    MEASUREMENT = 'measurement'
+    TOTAL = 'total'
+    TOTAL_INCREASING = 'total_increasing'
+class SensorEntityDescription(EntityDescription):
+    pass
+class SensorEntity(_StateWriter):
+    _attr_has_entity_name = True
+    _attr_native_unit_of_measurement = None
+    _attr_state_class = None
+    _attr_value_map = None
+sn.SensorDeviceClass = SensorDeviceClass
+sn.SensorStateClass = SensorStateClass
+sn.SensorEntityDescription = SensorEntityDescription
+sn.SensorEntity = SensorEntity
+comp.sensor = sn
+
+
+# ---- light platform (A/B pole and night-lamp gating tests) ----
+
+lt = mod('homeassistant.components.light')
+class ColorMode:
+    ONOFF = 'onoff'
+    BRIGHTNESS = 'brightness'
+    COLOR_TEMP = 'color_temp'
+    HS = 'hs'
+class LightEntity(_StateWriter):
+    _attr_has_entity_name = True
+    _attr_color_mode = None
+    _attr_supported_color_modes = None
+    _attr_min_color_temp_kelvin = None
+    _attr_max_color_temp_kelvin = None
+lt.ColorMode = ColorMode
+lt.LightEntity = LightEntity
+lt.ATTR_BRIGHTNESS = 'brightness'
+lt.ATTR_COLOR_TEMP_KELVIN = 'color_temp_kelvin'
+lt.ATTR_HS_COLOR = 'hs_color'
+comp.light = lt
+
+
+# ---- entity registry (stale-entity cleanup tests) ----
+
+er = mod('homeassistant.helpers.entity_registry')
+class _EntityRegistry:
+    """Minimal registry: unique_id -> entity_id, plus removals."""
+    def __init__(self):
+        self.entities = {}
+        self.removed = []
+    def seed(self, unique_id, entity_id):
+        self.entities[unique_id] = entity_id
+    def async_get_entity_id(self, domain, platform, unique_id):
+        return self.entities.get(unique_id)
+    def async_remove(self, entity_id):
+        self.removed.append(entity_id)
+        for uid, eid in list(self.entities.items()):
+            if eid == entity_id:
+                del self.entities[uid]
+registry = _EntityRegistry()
+def _async_get(hass):
+    return getattr(hass, "entity_registry", registry)
+er.async_get = _async_get
+er.EntityRegistry = _EntityRegistry
+helpers.entity_registry = er

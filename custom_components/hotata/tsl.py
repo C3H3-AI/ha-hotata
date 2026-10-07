@@ -71,3 +71,32 @@ def is_writable_property(device: HotataDevice, identifier: str) -> bool:
         definition.get("accessMode") or definition.get("access") or ""
     ).lower()
     return _WRITABLE_MARKER in access
+
+
+def enum_display(device: HotataDevice, identifier: str) -> dict[Any, str]:
+    """Return wire value -> label using the device's own TSL declaration.
+
+    The same identifier can be an enum on one product line and a plain number
+    on another: ``Position`` is an enum of stopping points on one airer and a
+    height percentage (0-255) on another. A hard-coded map therefore renders
+    one of them wrongly — a reported 0 means "no such function" on the first
+    and "0 %" (rail at the top) on the second. The device's declaration decides.
+    """
+    definition = property_definition(device, identifier) or {}
+    data_type = definition.get("dataType") or {}
+    if str(data_type.get("type") or "").lower() != "enum":
+        return {}
+    specs = data_type.get("specs") or {}
+    if not isinstance(specs, dict):
+        return {}
+    values = specs.get("enum") if isinstance(specs, dict) and isinstance(
+        specs.get("enum"), dict
+    ) else specs
+    display: dict[Any, str] = {}
+    for wire, label in values.items():
+        display[wire] = str(label)
+        try:
+            display[int(wire)] = str(label)
+        except (TypeError, ValueError):
+            continue
+    return display

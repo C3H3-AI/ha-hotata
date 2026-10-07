@@ -73,12 +73,21 @@ def make_device(properties, product_key="PK_AIRER", tsl_ids=()):
 class FakeCoordinator:
     def __init__(self, device):
         self.data = {device.iot_id: device}
+        self.hass = None
+
+
+def _entity_key(entity):
+    """Key of a description-driven entity, or the property/local name otherwise."""
+    description = getattr(entity, "entity_description", None)
+    if description is not None and getattr(description, "key", None):
+        return description.key
+    return getattr(entity, "identifier", None) or getattr(entity, "_attr_name", None)
 
 
 def switch_keys(device):
     """Run the factory and return the created switch keys, in order."""
     co = FakeCoordinator(device)
-    return [e.entity_description.key for e in _switches_for_device(co, device)]
+    return [_entity_key(e) for e in _switches_for_device(co, device)]
 
 
 # The full-featured declaration set every airer TSL carries (from live data:
@@ -113,6 +122,24 @@ def test_model1_without_disinfection():
     )
     got = switch_keys(d)
     check("model1: disinfection suppressed (explicit 1)", "DisinfectionSwitch" in got, False)
+
+
+def gated_sensor_keys(device):
+    """Keys of capability-gated sensors the factory would yield."""
+    from hotata.capabilities import resolve
+    from hotata.sensor import SENSORS
+    out = []
+    capabilities = resolve(device)
+    for description in SENSORS:
+        if description.capability is None:
+            continue
+        if capabilities is None:
+            if not device.properties:
+                continue
+        elif not capabilities.has(description.capability):
+            continue
+        out.append(description.key)
+    return out
 
 
 def test_unknown_model_reported_property_present():
@@ -212,20 +239,23 @@ def test_advanced_airer_gets_disinfection_without_model_code():
     check("advanced: drying created", "DryingSwitch" in got, True)
 
 
-def test_advanced_airer_tsl_only_created():
-    """The advanced family publishes no model code, so TSL alone decides.
+def test_advanced_airer_with_a_report_but_no_model_code_is_created():
+    """The advanced family publishes no model code, so a report is the evidence.
 
     ``a1abYBCSVlV`` (the D-3072S) reports ``ModelFunctionList`` but no
-    ``DeviceModelType``, so the gate cannot run and the declaration wins.
+    ``DeviceModelType``; a device that reports at all and states no model code
+    is genuinely unknown, so the entity is created (issue #11). Only a device
+    with nothing reported yet waits.
     """
     d = make_device(
-        {},
+        {"PowerSwitch": 1, "DisinfectionSwitch": 0},
         product_key="a1abYBCSVlV",
         tsl_ids=("DisinfectionSwitch", "AirDryingSwitch", "DryingSwitch",
                  "DeviceModelType"),
     )
     got = switch_keys(d)
-    check("advanced + TSL only: created", "DisinfectionSwitch" in got, True)
+    check("advanced, reported, no model code: created",
+          "DisinfectionSwitch" in got, True)
 
 
 def test_standard_airer_unaffected_by_family_split():
@@ -254,6 +284,87 @@ def test_gate_function_direct():
         d = make_device({"DisinfectionSwitch": 0, "DeviceModelType": model},
                         tsl_ids=TSL_AIRER)
         check(f"gate(model={model})", _airer_model_supported(d, desc), want)
+
+
+def test_empty_report_waits_instead_of_guessing():
+    """A cold start (no properties yet) must not create gated entities.
+
+    Entities are created once and never withdrawn, so guessing while the first
+    poll is still in flight leaves spurious switches behind forever. Seen live
+    on 2026-10-07: 风干/烘干/负离子 reappeared on the model-2 device because its
+    first poll returned no properties, while the next one reported
+    DeviceModelType 2.
+    """
+    d = make_device({}, tsl_ids=TSL_AIRER)
+    got = switch_keys(d)
+    check("no report yet: disinfection not created", "DisinfectionSwitch" in got, False)
+    check("no report yet: no drying either", "DryingSwitch" in got, False)
+    check("no report yet: power is not gated", "PowerSwitch" in got, True)
+
+
+def test_report_without_a_model_code_still_allows():
+    """Issue #11: a device that reports but publishes no model code is allowed.
+
+    The distinction is "has not reported" versus "reported, but without a model
+    code" — only the first one waits.
+    """
+    d = make_device({"PowerSwitch": 1, "DisinfectionSwitch": 0}, tsl_ids=TSL_AIRER)
+    got = switch_keys(d)
+    check("reported, no model code: disinfection created",
+          "DisinfectionSwitch" in got, True)
+
+
+def test_gated_sensor_waits_for_the_first_report():
+    d = make_device({}, tsl_ids=TSL_AIRER)
+    check("sensor gate: waiting while there is no report",
+          gated_sensor_keys(d), [])
+    d2 = make_device(
+        {"PowerSwitch": 1, "DissolveOxygenSwitch": 0, "DisinfectionSwitch": 0},
+        tsl_ids=TSL_AIRER,
+    )
+    check("sensor gate: reported without a model code -> allowed",
+          "DisinfectionRemainingTime" in gated_sensor_keys(d2), True)
+
+
+def _seed_registry(device, key, entity_id):
+    """A fresh registry holding one entry an earlier version left behind.
+
+    Fresh per test on purpose: the stub keeps a module-level registry, so
+    sharing it would leak removals between cases.
+    """
+    from homeassistant.helpers import entity_registry as er
+    from hotata.entity import entity_identity
+    registry = er.EntityRegistry()
+    registry.seed(entity_identity(device, key), entity_id)
+    return registry
+
+
+def test_stale_entry_is_removed_when_capability_says_absent():
+    """Self-healing: a leftover entity for a function the device lacks goes away."""
+    import types as _types
+    d = make_device(
+        {"PowerSwitch": 1, "DryingSwitch": 0, "DeviceModelType": 2},
+        tsl_ids=TSL_AIRER,
+    )
+    registry = _seed_registry(d, "DryingSwitch", "switch.dev1_hot_drying")
+    co = FakeCoordinator(d)
+    co.hass = _types.SimpleNamespace(entity_registry=registry)
+    keys = [_entity_key(e) for e in _switches_for_device(co, d)]
+    check("drying switch not created", "DryingSwitch" in keys, False)
+    check("stale registry entry removed",
+          registry.removed, ["switch.dev1_hot_drying"])
+
+
+def test_stale_entry_survives_while_waiting_for_the_first_report():
+    """Waiting is not proof: an entity must not be deleted on a cold start."""
+    import types as _types
+    d = make_device({}, tsl_ids=TSL_AIRER)
+    registry = _seed_registry(d, "DryingSwitch", "switch.dev1_hot_drying")
+    co = FakeCoordinator(d)
+    co.hass = _types.SimpleNamespace(entity_registry=registry)
+    keys = [_entity_key(e) for e in _switches_for_device(co, d)]
+    check("nothing created while waiting", "DryingSwitch" in keys, False)
+    check("but nothing was deleted either", registry.removed, [])
 
 
 def main():

@@ -77,11 +77,19 @@ def make_device(iot_id="dev-airer", properties=None):
 class FakeRuntime:
     """Stands in for coordinator.DeviceRuntime position-simulation state."""
 
-    def __init__(self, descent_time=40, simulated_position=100):
+    def __init__(self, descent_time=40, simulated_position=100,
+                 invert_direction=False):
         self.descent_time = descent_time
         self.simulated_position = simulated_position
         self.closing_start = None
         self.target_position = None
+        # Per-device direction preference (issue #15). Tests flip it directly.
+        self.invert_direction = invert_direction
+        self.saved = None
+
+    async def async_set_invert_direction(self, value):
+        self.invert_direction = bool(value)
+        self.saved = {"invert_direction": bool(value)}
 
 
 class FakeAccount:

@@ -46,6 +46,11 @@ from .models import HotataDevice
 _LOGGER = logging.getLogger(__name__)
 
 
+#: Bumped when the meaning of ``invert_direction`` changes, so stored choices
+#: can be migrated instead of silently flipping the user's direction.
+DIRECTION_SEMANTICS_VERSION = 2
+
+
 @dataclass
 class DeviceRuntime:
     """Per-device client-side state: config + cover position simulation."""
@@ -54,6 +59,10 @@ class DeviceRuntime:
     iot_id: str
     store: Store = None  # type: ignore[assignment]
     descent_time: int = DEFAULT_DESCENT_TIME
+    #: Local-only preference (issue #15). Off means the 4.0.14 default — open
+    #: (展开) lowers the rail; on means the reverse, open raises it. Nothing is
+    #: ever sent to the cloud.
+    invert_direction: bool = False
     # Shared position-simulation state (written by the cover, the reset
     # button and the descent-time number).
     simulated_position: int = 100
@@ -66,11 +75,36 @@ class DeviceRuntime:
         data = await self.store.async_load() or {}
         if "descent_time" in data:
             self.descent_time = int(data["descent_time"])
+        if "invert_direction" in data:
+            self.invert_direction = bool(data["invert_direction"])
+            if data.get("direction_semantics") != DIRECTION_SEMANTICS_VERSION:
+                # 4.0.14 made "off" mean 打开=放下. Whoever had the switch on
+                # asked for exactly that, and whoever left it alone was on the
+                # old default — so both migrate to the new default: off. Write
+                # it back so the stored value stops disagreeing with the live
+                # one (and so the migration cannot run twice).
+                self.invert_direction = False
+                await self._async_save()
 
     async def async_set_descent_time(self, value: int) -> None:
         """Persist a new descent time."""
         self.descent_time = value
-        await self.store.async_save({"descent_time": value})
+        await self._async_save()
+
+    async def async_set_invert_direction(self, value: bool) -> None:
+        """Persist the direction preference (local only, no cloud call)."""
+        self.invert_direction = bool(value)
+        await self._async_save()
+
+    async def _async_save(self) -> None:
+        """Write every per-device preference, so one never drops another."""
+        await self.store.async_save(
+            {
+                "descent_time": self.descent_time,
+                "invert_direction": self.invert_direction,
+                "direction_semantics": DIRECTION_SEMANTICS_VERSION,
+            }
+        )
 
 
 class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
@@ -159,9 +193,9 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
         try:
             devices = await self._async_discover_devices()
             for device in devices:
-                # Connectivity first: an offline device rejects property and
-                # TSL reads, so asking anyway only burns requests and nudges
-                # the cloud's 403 (操作过于频繁) throttle.
+                # Connectivity first: a device that is down should not be
+                # polled hard, and the cadence drops to the offline interval
+                # below.
                 try:
                     device.online = await self.account.api.async_get_online(
                         device.iot_id
@@ -172,10 +206,31 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
                         device.iot_id,
                         err,
                     )
-                if device.online is False:
+                # Warm-up: the first poll has to establish what the device *is*
+                # — its thing model and its reported capabilities — even while
+                # it is offline. Measured on a device the cloud reports as
+                # offline (status 3): /thing/properties/get still answers with
+                # the full shadow (DeviceModelType included) and
+                # /thing/tsl/get with the whole declaration. Skipping both
+                # leaves has_property() with nothing to stand on, so none of
+                # that device's entities are ever created and automations lose
+                # their entity ids on every restart. Only a device that is both
+                # offline *and* already known is skipped.
+                cache_key = device.product_key or device.iot_id
+                previous = (self.data or {}).get(device.iot_id)
+                warm = (
+                    cache_key in self.thing_models
+                    and previous is not None
+                    and bool(previous.properties)
+                )
+                if device.online is False and warm:
                     # Keep the last known properties so entities stay put
                     # (they go unavailable via HotataEntity.available) and we
-                    # can tell the moment it comes back.
+                    # can tell the moment it comes back. Device objects are
+                    # rebuilt from the device list on every poll, so this has
+                    # to be carried over explicitly.
+                    device.properties = previous.properties
+                    device.thing_model = self.thing_models[cache_key]
                     _LOGGER.debug(
                         "Device %s offline, skipping property poll",
                         device.iot_id,
@@ -205,7 +260,6 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
                             err,
                         )
                 try:
-                    cache_key = device.product_key or device.iot_id
                     if cache_key not in self.thing_models:
                         self.thing_models[cache_key] = (
                             await self.account.api.async_get_thing_model(
