@@ -30,6 +30,9 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from .const import (
     ACCOUNT_HOST,
+    ACCOUNT_PRIVATE_KEY,
+    AES_IV,
+    AES_KEY,
     API_HOST,
     APP_KEY,
     APP_SECRET,
@@ -47,47 +50,25 @@ from .models import HotataDevice
 
 _LOGGER = logging.getLogger(__name__)
 
-# This is the production request-signing key shipped in version 3.5.8 of the
-# public Android application.  It is an application protocol constant, not a
-# user's credential.
-_ACCOUNT_PRIVATE_KEY = (
-    "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCXAsmTBgCKxOZ3"
-    "okMNkjw9h6X2BD5CJ8sQhNBGBoTEUf3USNbnLiN9gpYLCziK50M5BsOAIADqxbsN"
-    "/K7cYwNMtoKFKiTqTajM4tAJ3LKL1MlpEZM7uPjS1EKi9WNXalnfaI+9VrnuHXiA"
-    "Zc9idZdx4oxeD4PwKHjKzqIFNHC9WrvoofUabZkzrfSjygiJKUSeWGHtyPB/YC+r"
-    "t1lGFGMZcFY5BX4ww1EquWeulzoWQcOsKwjUDmU5KM5HwUt1z7fFtN1XXM4tTAow"
-    "Z08mmMorDQso9icMX0jCbraRX0HL9q6eK8jjeFFhcMYDX2rcM2+8X9Zd/56SRGIm"
-    "jP+sdCs7AgMBAAECggEAHb4izZ5lBO/7JJ0E7+tZihTpjycOzCDiUgKWsvQduj0b"
-    "7W/bQ/VGcDYEL3CqVlFuYBEA+H9VLuh7Cyo1lpq5z6Yy1t+SHcPl91TE/OxHDlt+"
-    "v/8CLMUl3QCJj2cdhd4gjWwew4ANZuTPExr6Wb4ncfrZAr2zkt2lzOwd5UCK5ABp"
-    "dKNozwC+Gpt7RV5nFw8dqL1ODH7q6zGVEEQWA9WG9LV6zrv1dfuP4X1X6xl1USdc"
-    "WZbJql7Zw1acXC7DSpmd4pqRhp0Dn0iL8x3fRMgXMD1aEc7aTRqgkR02y8CdlX9v"
-    "CpW6GYSImn3YbngL/GTzZIEaxnM/ejnd57iaEJ56wQKBgQDNKJUdMOSbpQ1SKMyx"
-    "iCvophlF40r1kLPQ+JrIM2V7RuTSxUUJhk9xI5l9+RdpvRb4bhMvBsCwy+vHcDk4"
-    "bhv55snkF0+R2wz2UsnvgIPOx8Aju4ojkfgOdW0pQh4sQGykbWjEQ767q7vfhHVC"
-    "eHHpylT2RVLkcapLiy8RK+VpIwKBgQC8bwlS/E5DiidNBkLTDEpLtbVqYkq+hRME"
-    "yAg2ep2OX1kl6sWwC8Vj2sEqCY/9MplZ3DdcHocjNU2IkksUWgeBVk0ushQsIcWj"
-    "OQv+GUhjiuAs28CoP64dvzT1xNV8PIF2HpRv+SheHkuSFOtg3UWc7CmC5Ea/uwgy"
-    "V1SxoaCzCQKBgQCvG0FSvgWRt2nMQ1ia+tAHbaXKmfrD6DMiXN63m+61LshmAcww"
-    "Gfw6ZBlBhVbvgF5XwpQLImdbP2JKQsYEHS8xuEN/tEnNAztoDzeefYGC/8lGdm6s"
-    "d41SwfVfLrjUKlTQbzXptqzYP/dGCyeOiYEo+/JSlM7wfvfMLMsKi/3uIwKBgQCP"
-    "myfGANc8jdtpzi27XhB5JqB91S8Vh6F48WGg802EJZJxXT0P78idUygHe4Yq9xb7"
-    "7uKZ6AIhiQvv214wwnQZ08W6oqjRAWP4Aw/qtSYABuTWCxwGnZF6xi/8Zeg1aH9Z"
-    "n/CMbZygLgJ18E96YOgesbTpNkPc9xNGGlxHi+BG0QKBgC5CtDrJrzqBNlxjRBM9"
-    "gKF3b/T2HotQEDOB5V6uwgWUq0m2E2XOPMFe7Qw2jp2Ki+a8Utz+6DRfcpAeFM+D"
-    "h0nf8Ue1UxPTYHPPN4pfKdODpcTNn0XIhQS6OwmD5sUApF3D1ew1K1cECU1bjlT2"
-    "F1Sws4xEH+OMGrhQadNNtG1z"
-)
-
-_AES_KEY = b"SnqUuPDWy5wusGG7"
-_AES_IV = b"tvGjXli9WjpfOmNK"
+# Compared against the lower-cased key with "_" and "-" removed, so
+# accessToken / access_token / access-token all match.
 _SENSITIVE_RESPONSE_KEYS = {
+    "accesskey",
     "accesstoken",
     "authcode",
+    "authorization",
+    "authtoken",
+    "bindsession",
+    "clientsecret",
     "devicekey",
     "devicesecret",
+    "identityid",
+    "iottoken",
+    "iotrefreshtoken",
+    "openid",
     "password",
     "refreshtoken",
+    "secret",
     "sessionid",
     "token",
 }
@@ -118,18 +99,29 @@ def _is_success_code(value: Any) -> bool:
 
 
 def _redact_sensitive(value: Any) -> Any:
-    """Return a copy with credential-like response fields redacted."""
+    """Return a copy with credential-like response fields redacted.
+
+    This cloud nests payloads inside JSON-encoded strings, so a string that
+    parses as an object is redacted too instead of being passed through.
+    """
     if isinstance(value, dict):
         return {
             key: (
                 "<redacted>"
-                if str(key).lower() in _SENSITIVE_RESPONSE_KEYS
+                if str(key).lower().replace("_", "").replace("-", "")
+                in _SENSITIVE_RESPONSE_KEYS
                 else _redact_sensitive(child)
             )
             for key, child in value.items()
         }
     if isinstance(value, list):
         return [_redact_sensitive(child) for child in value]
+    if isinstance(value, str) and value.lstrip()[:1] in ("{", "["):
+        try:
+            decoded = json.loads(value)
+        except ValueError:
+            return value
+        return json.dumps(_redact_sensitive(decoded), ensure_ascii=False)
     return value
 
 
@@ -183,7 +175,7 @@ class HotataApi:
         padder = padding.PKCS7(128).padder()
         padded = padder.update(password.encode()) + padder.finalize()
         encryptor = Cipher(
-            algorithms.AES(_AES_KEY), modes.CBC(_AES_IV)
+            algorithms.AES(AES_KEY), modes.CBC(AES_IV)
         ).encryptor()
         encrypted = encryptor.update(padded) + encryptor.finalize()
         return base64.b64encode(encrypted).decode()
@@ -205,7 +197,7 @@ class HotataApi:
             if value is not None and not isinstance(value, (list, dict))
         )
         key = serialization.load_der_private_key(
-            base64.b64decode(_ACCOUNT_PRIVATE_KEY), password=None
+            base64.b64decode(ACCOUNT_PRIVATE_KEY), password=None
         )
         body["sign"] = base64.b64encode(
             key.sign(plain.encode(), asymmetric_padding.PKCS1v15(), hashes.SHA256())

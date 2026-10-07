@@ -1,21 +1,21 @@
 """Capability-gating tests: which entities exist for which device state.
 
-Two product families describe their hardware differently and need different
-gates (issue #11):
+The gate has two layers (issue #11):
 
-- standard airers (AIRER_PRODUCT_KEYS) publish DeviceModelType (0-3). Their
-  TSL is a product-line template listing every possible function, and the
-  report stream mirrors that template, not the fitted hardware — verified on
-  a model-2 device that reports DryingSwitch/AirDryingSwitch/IonsSwitch it
-  does not have. The model table is the only hardware authority.
-- advanced airers (ADVANCED_AIRER_PRODUCT_KEYS) publish no model code and
-  their TSL is per-model accurate (59 vs 29 properties). Applying the model
-  gate there suppressed real switches; they are gated on declaration plus an
-  actual report.
+- presence: the identifier is TSL-declared or actually reported;
+- authority: ``DeviceModelType``, the 0-3 model code.
 
-Real diagnostics behind these cases: a model-2 standard device, and a
-D-3072S (pk a1abYBCSVlV, device 044a6997f003) that reports DisinfectionSwitch
-with DeviceModelType = null.
+The model code is the hardware authority. The TSL is a product-line template
+listing every possible function, and the report stream mirrors that template
+rather than the fitted hardware — verified live on a model-2 device
+(``a1kM9JAZ7aQ``) that reports DryingSwitch/AirDryingSwitch/IonsSwitch it does
+not have, which is why v4.0.11's "trust the report" rule was wrong.
+
+When no model code is published (the D-3072S, pk ``a1abYBCSVlV``, reports
+``ModelFunctionList`` instead), there is nothing to check a declaration
+against. The rule there is **unknown means allow**: create, and log it. That
+matches the other public Hotata integration (chliny/ha-hotata) and the
+maintainer's stated preference for over-providing over silently dropping.
 
 Run from anywhere:  python3 tests/test_capability_gating.py
 """
@@ -119,53 +119,58 @@ def test_unknown_model_reported_property_present():
     """DisinfectionSwitch reported but DeviceModelType absent.
 
     The report mirrors the TSL, not the hardware (proven live on a model-2
-    device reporting switches it lacks), so a report is NOT evidence. The
-    entity must not be created — creating it was v4.0.8's regression.
+    device reporting switches it lacks), so a report is NOT evidence either
+    way. With no model code there is nothing to check the declaration
+    against, and the rule is to create rather than guess — "unknown means
+    allow". Same rule as chliny/ha-hotata's `_airer_model_supported`.
     """
     d = make_device(
         {"PowerSwitch": 1, "DisinfectionSwitch": 0},
         tsl_ids=TSL_AIRER,
     )
     got = switch_keys(d)
-    check("unknown model: disinfection not created (no guess)",
-          "DisinfectionSwitch" in got, False)
+    check("unknown model: disinfection created (unknown means allow)",
+          "DisinfectionSwitch" in got, True)
 
 
-def test_unknown_model_tsl_only_declaration_suppressed():
-    """TSL declares it but the device never reports it: still suppressed.
+def test_unknown_model_tsl_only_declaration_created():
+    """TSL declares it and the device never reports it: still created.
 
-    TSL presence alone is not hardware (the IonsSwitch lesson). With no model
-    code and no report, we cannot confirm the hardware — keep it out.
+    Without a model code the declaration is the only capability statement we
+    have, and the integration prefers a visible-but-possibly-spurious entity
+    over silently dropping a real one.
     """
     d = make_device({"PowerSwitch": 1}, tsl_ids=TSL_AIRER)
     got = switch_keys(d)
-    check("unknown model + TSL-only: disinfection suppressed",
-          "DisinfectionSwitch" in got, False)
+    check("unknown model + TSL-only: disinfection created",
+          "DisinfectionSwitch" in got, True)
 
 
-def test_unparseable_model_reported_property_present():
-    """A garbled model value defers to an actual report, same as absent."""
+def test_unparseable_model_created():
+    """A garbled model value cannot be checked, so it is treated as unknown."""
     d = make_device(
         {"PowerSwitch": 1, "DisinfectionSwitch": 0, "DeviceModelType": "x9"},
         tsl_ids=TSL_AIRER,
     )
     got = switch_keys(d)
-    check("garbled model: disinfection not created (no guess)",
-          "DisinfectionSwitch" in got, False)
+    check("garbled model: disinfection created",
+          "DisinfectionSwitch" in got, True)
 
 
-def test_out_of_range_model_reported_property_still_suppressed():
-    """An explicit model outside every whitelist wins over a report.
+def test_out_of_range_model_created():
+    """A model code outside 0-3 is unmappable, hence unknown — and allowed.
 
-    The 0-3 table is the product line's authority; a device claiming model 99
-    must not resurrect capabilities the table excludes.
+    There is no table entry to apply, so this is the same situation as a device
+    publishing nothing at all: create and log rather than guess away. (The
+    D-3072S publishes no model code but a function list; a device may also
+    publish a value from a newer product line this version has never seen.)
     """
     d = make_device(
         {"PowerSwitch": 1, "DisinfectionSwitch": 0, "DeviceModelType": 99},
         tsl_ids=TSL_AIRER,
     )
     got = switch_keys(d)
-    check("model 99: disinfection suppressed", "DisinfectionSwitch" in got, False)
+    check("model 99: disinfection created (unmappable)", "DisinfectionSwitch" in got, True)
 
 
 def test_no_tsl_declaration_no_entity_even_when_reported():
@@ -207,8 +212,12 @@ def test_advanced_airer_gets_disinfection_without_model_code():
     check("advanced: drying created", "DryingSwitch" in got, True)
 
 
-def test_advanced_airer_tsl_only_still_suppressed():
-    """Even on the advanced family, TSL alone is not evidence."""
+def test_advanced_airer_tsl_only_created():
+    """The advanced family publishes no model code, so TSL alone decides.
+
+    ``a1abYBCSVlV`` (the D-3072S) reports ``ModelFunctionList`` but no
+    ``DeviceModelType``, so the gate cannot run and the declaration wins.
+    """
     d = make_device(
         {},
         product_key="a1abYBCSVlV",
@@ -216,7 +225,7 @@ def test_advanced_airer_tsl_only_still_suppressed():
                  "DeviceModelType"),
     )
     got = switch_keys(d)
-    check("advanced + TSL only: suppressed", "DisinfectionSwitch" in got, False)
+    check("advanced + TSL only: created", "DisinfectionSwitch" in got, True)
 
 
 def test_standard_airer_unaffected_by_family_split():
@@ -241,7 +250,7 @@ def test_standard_airer_unaffected_by_family_split():
 def test_gate_function_direct():
     """Exercise _airer_model_supported directly on the boundary values."""
     desc = next(d for d in AIRER_SWITCHES if d.key == "DisinfectionSwitch")
-    for model, want in ((0, True), (2, True), (3, True), (1, False), (99, False), (None, False)):
+    for model, want in ((0, True), (2, True), (3, True), (1, False), (99, True), (None, True)):
         d = make_device({"DisinfectionSwitch": 0, "DeviceModelType": model},
                         tsl_ids=TSL_AIRER)
         check(f"gate(model={model})", _airer_model_supported(d, desc), want)

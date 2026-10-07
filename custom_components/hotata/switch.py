@@ -16,15 +16,21 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .capabilities import (
+    CAP_AIR_DRYING,
+    CAP_DISINFECTION,
+    CAP_DRYING,
+    CAP_IONS,
+    resolve,
+)
 from .const import (
     ADVANCED_AIRER_PRODUCT_KEYS,
     BROADCAST_PRODUCT_KEYS,
     DOMAIN,
-    MODEL_AIR_DRYING,
-    MODEL_DISINFECTION,
-    MODEL_HOT_DRYING,
+    FAMILY_AIRER,
     SOCKET_PRODUCT_KEYS,
     WALL_SWITCH_PRODUCT_KEYS,
+    product_family,
 )
 from .coordinator import HotataCoordinator
 from .entity import (
@@ -37,12 +43,18 @@ from .entity import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# The factory runs on every coordinator update, so the "cannot tell" warning is
+# emitted once per device and capability instead of on every poll.
+_UNRESOLVED_WARNED: set[tuple[str, str]] = set()
+
 
 @dataclass(frozen=True, kw_only=True)
 class HotataSwitchDescription(SwitchEntityDescription):
     """Describe one boolean property."""
 
-    supported_models: frozenset[int] | None = None
+    #: Optional airer capability this switch belongs to (see capabilities.py).
+    #: None means the switch is not capability-gated.
+    capability: str | None = None
 
 
 AIRER_SWITCHES: tuple[HotataSwitchDescription, ...] = (
@@ -56,27 +68,25 @@ AIRER_SWITCHES: tuple[HotataSwitchDescription, ...] = (
         key="DisinfectionSwitch",
         translation_key="disinfection",
         icon="mdi:shield-sun-outline",
-        supported_models=MODEL_DISINFECTION,
+        capability=CAP_DISINFECTION,
     ),
     HotataSwitchDescription(
         key="AirDryingSwitch",
         translation_key="air_drying",
         icon="mdi:fan",
-        supported_models=MODEL_AIR_DRYING,
+        capability=CAP_AIR_DRYING,
     ),
     HotataSwitchDescription(
         key="DryingSwitch",
         translation_key="drying",
         icon="mdi:heat-wave",
-        supported_models=MODEL_HOT_DRYING,
+        capability=CAP_DRYING,
     ),
     HotataSwitchDescription(
         key="IonsSwitch",
         translation_key="ions",
         icon="mdi:atom",
-        # Negative ions ship only on the full-featured flagship (model 0);
-        # lesser models declare the property in TSL but lack the hardware.
-        supported_models=MODEL_HOT_DRYING,
+        capability=CAP_IONS,
     ),
 )
 
@@ -107,58 +117,39 @@ ADVANCED_AIRER_SWITCHES = (
 
 
 def _airer_model_supported(device, description: HotataSwitchDescription) -> bool:
-    """TSL presence + product-family capability gating.
+    """Presence check plus capability resolution.
 
-    Two product families describe their hardware differently, so they need
-    different gates (issue #11):
+    A capability is decided by ``capabilities.resolve``, which reads the
+    device's own ``ModelFunctionList`` bit string first (the value the vendor's
+    app renders its buttons from) and falls back to ``DeviceModelType``. Both
+    the TSL and the property report are product-line templates rather than
+    hardware — verified on a model-2 device that reports DryingSwitch,
+    AirDryingSwitch and IonsSwitch it does not have — so neither is evidence on
+    its own; only the capability fields are.
 
-    - standard airers (``AIRER_PRODUCT_KEYS``) publish a model code
-      (``DeviceModelType`` 0-3). Their TSL is a product-line template that
-      lists every possible function, and the report stream mirrors that
-      template rather than the fitted hardware — verified on a model-2 device
-      that reports DryingSwitch/AirDryingSwitch/IonsSwitch it does not have.
-      The model table is therefore the only authority on hardware.
-    - advanced airers (``ADVANCED_AIRER_PRODUCT_KEYS``) do not publish the
-      model code at all, and their TSL is per-model accurate (59 properties
-      instead of 29). Applying the model gate to them suppressed real
-      switches — the D-3072S lost its disinfection switch. They are gated on
-      declaration plus an actual report instead.
-
-    Where the model code is absent AND the family is not the advanced one,
-    there is nothing to check the table against. Creating the entity would be
-    a guess, and entities are never removed once added, so a wrong guess is
-    permanent (that guess was v4.0.8's regression). The gap is surfaced with
-    a warning instead.
+    When a device publishes neither field there is nothing to check against,
+    and the rule is to create rather than guess away ("unknown means allow"),
+    which is also what the other public Hotata integration converged on
+    (chliny/ha-hotata). The case is logged so it stays visible.
     """
     if not has_property(device, description.key):
         return False
-    if description.supported_models is None:
+    if description.capability is None:
         return True
-    if device.product_key in ADVANCED_AIRER_PRODUCT_KEYS:
-        # No model code on this family: trust declaration + an actual report.
-        return description.key in device.properties
-    model = property_value(device, "DeviceModelType")
-    if model is None:
-        _LOGGER.warning(
-            "Capability %s: device %s does not report DeviceModelType; "
-            "cannot confirm hardware support, entity not created. Please "
-            "report this at the integration's issue tracker.",
-            description.key,
-            device.device_name or device.iot_id,
-        )
-        return False
-    try:
-        return int(model) in description.supported_models
-    except (TypeError, ValueError):
-        _LOGGER.warning(
-            "Capability %s: device %s reports an unparseable DeviceModelType "
-            "(%r); entity not created. Please report this at the "
-            "integration's issue tracker.",
-            description.key,
-            device.device_name or device.iot_id,
-            model,
-        )
-        return False
+    capabilities = resolve(device)
+    if capabilities is None:
+        token = (device.iot_id, description.capability or description.key)
+        if token not in _UNRESOLVED_WARNED:
+            _UNRESOLVED_WARNED.add(token)
+            _LOGGER.warning(
+                "Capability %s: device %s publishes neither ModelFunctionList "
+                "nor a usable DeviceModelType, so the entity is created. "
+                "Please share diagnostics at the integration's issue tracker.",
+                description.key,
+                device.device_name or device.iot_id,
+            )
+        return True
+    return capabilities.has(description.capability)
 
 
 def _switches_for_device(
@@ -174,10 +165,20 @@ def _switches_for_device(
         seen.add(description.key)
         return HotataSwitch(coordinator, device, description)
 
-    for description in AIRER_SWITCHES:
-        entity = add(description)
-        if entity:
-            yield entity
+    # Airer switches belong to airers. A device whose product key is a known
+    # non-airer family never gets them, even if its product-line TSL template
+    # happens to declare the identifier. Unknown keys keep the legacy path.
+    family = product_family(device.product_key)
+    if family in (None, FAMILY_AIRER):
+        if family is None:
+            _LOGGER.debug(
+                "Unknown product key %s: falling back to property gating",
+                device.product_key,
+            )
+        for description in AIRER_SWITCHES:
+            entity = add(description)
+            if entity:
+                yield entity
     if device.product_key in ADVANCED_AIRER_PRODUCT_KEYS:
         for description in ADVANCED_AIRER_SWITCHES:
             entity = add(description)

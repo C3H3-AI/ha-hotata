@@ -41,9 +41,14 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import (
     DOMAIN,
     LOCK_PRODUCT_KEYS,
-    MODEL_AIR_DRYING,
-    MODEL_DISINFECTION,
-    MODEL_HOT_DRYING,
+)
+from .capabilities import (
+    CAP_AIR_DRYING,
+    CAP_DISINFECTION,
+    CAP_DRYING,
+    CAP_IONS,
+    CAP_LIGHT,
+    resolve,
 )
 from .coordinator import HotataCoordinator
 from .entity import (
@@ -62,7 +67,8 @@ class HotataSensorDescription(SensorEntityDescription):
     """Describe one reported property."""
 
     value_map: dict[int, str] | None = None
-    supported_models: frozenset[int] | None = None
+    #: Optional airer capability this sensor belongs to (see capabilities.py).
+    capability: str | None = None
     # TSL declarations exist for features many units lack in hardware (e.g.
     # ambient temperature on basic airers). When True the entity is only
     # created if the cloud actually REPORTS the property, ignoring the TSL.
@@ -78,7 +84,7 @@ def _sensor(
     icon: str | None = None,
     value_map: dict[int, str] | None = None,
     diagnostic: bool = False,
-    supported_models: frozenset[int] | None = None,
+    capability: str | None = None,
     requires_report: bool = False,
 ) -> HotataSensorDescription:
     return HotataSensorDescription(
@@ -94,7 +100,7 @@ def _sensor(
         icon=icon,
         value_map=value_map,
         entity_category=EntityCategory.DIAGNOSTIC if diagnostic else None,
-        supported_models=supported_models,
+        capability=capability,
         requires_report=requires_report,
     )
 
@@ -124,14 +130,14 @@ SENSORS: tuple[HotataSensorDescription, ...] = (
             name,
             unit=UnitOfTime.MINUTES,
             icon="mdi:timer-outline",
-            supported_models=models,
+            capability=capability,
         )
-        for key, name, models in (
-            ("LightRemainingTime", "照明剩余时间", None),
-            ("DisinfectionRemainingTime", "消毒剩余时间", MODEL_DISINFECTION),
-            ("AirDryingRemainingTime", "风干剩余时间", MODEL_AIR_DRYING),
-            ("DryingRemainingTime", "烘干剩余时间", MODEL_HOT_DRYING),
-            ("IonsRemainingTime", "负离子剩余时间", MODEL_HOT_DRYING),
+        for key, name, capability in (
+            ("LightRemainingTime", "照明剩余时间", CAP_LIGHT),
+            ("DisinfectionRemainingTime", "消毒剩余时间", CAP_DISINFECTION),
+            ("AirDryingRemainingTime", "风干剩余时间", CAP_AIR_DRYING),
+            ("DryingRemainingTime", "烘干剩余时间", CAP_DRYING),
+            ("IonsRemainingTime", "负离子剩余时间", CAP_IONS),
             ("RemainingWorkTime", "剩余工作时间", None),
             ("TargetRunningTime", "目标运行时间", None),
             ("WorkTime", "工作时长", None),
@@ -273,21 +279,12 @@ LOCK_SENSORS: tuple[HotataSensorDescription, ...] = tuple(
 )
 
 
-def _model_type(device):
-    value = property_value(device, "DeviceModelType")
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def _entities(coordinator: HotataCoordinator, device):
     yield HotataIntegrationStatusSensor(coordinator, device)
     yield HotataDeviceSensor(coordinator, device)
     descriptions = SENSORS + (
         LOCK_SENSORS if device.product_key in LOCK_PRODUCT_KEYS else ()
     )
-    model = _model_type(device)
     for description in descriptions:
         if description.requires_report:
             # Hardware-dependent feature: only trust actual reports, not TSL.
@@ -295,17 +292,21 @@ def _entities(coordinator: HotataCoordinator, device):
                 continue
         elif not has_property(device, description.key):
             continue
-        if (
-            description.supported_models is not None
-            and model is not None
-            and model not in description.supported_models
-        ):
-            _LOGGER.debug(
-                "Skipping sensor %s: model type %s lacks it",
-                description.key,
-                model,
-            )
-            continue
+        if description.capability is not None:
+            # The capability comes from the device's own ModelFunctionList bit
+            # string, or from DeviceModelType when it publishes no list. The
+            # TSL and the report are product-line templates, so neither decides
+            # on its own. Unknown capabilities are created, not guessed away.
+            capabilities = resolve(device)
+            if capabilities is not None and not capabilities.has(
+                description.capability
+            ):
+                _LOGGER.debug(
+                    "Skipping sensor %s: %s says the device lacks it",
+                    description.key,
+                    capabilities.source,
+                )
+                continue
         yield HotataPropertySensor(coordinator, device, description)
 
 

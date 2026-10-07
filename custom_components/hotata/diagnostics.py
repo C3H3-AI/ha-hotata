@@ -23,6 +23,41 @@ def _mask_username(value: Any) -> str:
     return "****"
 
 
+# Reported properties that identify a household or a physical unit. Wi-Fi
+# names are dropped outright; serials and MACs keep enough of their shape to
+# correlate a report without publishing the whole value.
+_PRIVATE_PROPERTY_KEYS = {
+    "wifi_ssid",
+    "wifi_ap_bssid",
+    "wifi_bssid",
+    "ssid",
+}
+_PARTIAL_PROPERTY_KEYS = {
+    "sncode",
+    "wifimacaddr",
+    "wifi_mac",
+    "mac",
+}
+
+
+def _redact_properties(properties: dict[str, Any]) -> dict[str, Any]:
+    """Mask household-identifying values in a device's property report."""
+    redacted: dict[str, Any] = {}
+    for key, value in properties.items():
+        normalised = str(key).lower().replace("_", "").replace("-", "")
+        raw = value.get("value") if isinstance(value, dict) else value
+        if normalised in _PRIVATE_PROPERTY_KEYS:
+            redacted[key] = "<redacted>"
+        elif normalised in _PARTIAL_PROPERTY_KEYS and isinstance(raw, str):
+            text = raw.strip()
+            redacted[key] = (
+                f"{text[:4]}…{text[-4:]}" if len(text) > 12 else "<redacted>"
+            )
+        else:
+            redacted[key] = value
+    return redacted
+
+
 def _redact_entry_data(data: dict[str, Any]) -> dict[str, Any]:
     """Redact credentials (tokens truncated, passwords/usernames masked).
 
@@ -78,7 +113,7 @@ async def async_get_config_entry_diagnostics(
                     "device_name": device.device_name,
                     "parent_iot_id": device.parent_iot_id,
                     "online": device.online,
-                    "properties": device.properties,
+                    "properties": _redact_properties(device.properties),
                     "descent_time": (
                         runtime.descent_time if runtime else None
                     ),

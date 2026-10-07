@@ -8,7 +8,7 @@ set_property:
       name: IoT ID
       description: The iotId of the target device (see the device's 状态 sensor attributes).
       required: true
-      example: dNl3rypkpU6cBXGQHrzB000000
+      example: dNl3rxxxxxxxxxxxxxxxxx000000
     property:
       name: Property
       description: The TSL property identifier, e.g. LightSwitch.
@@ -30,7 +30,7 @@ invoke_service:
       name: IoT ID
       description: The iotId of the target device.
       required: true
-      example: dNl3rypkpU6cBXGQHrzB000000
+      example: dNl3rxxxxxxxxxxxxxxxxx000000
     identifier:
       name: Service
       description: The TSL service identifier, e.g. LightBrightnessControl.
