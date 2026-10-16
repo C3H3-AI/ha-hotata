@@ -7,7 +7,8 @@
         "data": {
           "username": "用户名（手机号）",
           "password": "密码",
-          "descent_time": "下降时长（秒），0=禁用模拟位置，使用设备自带位置"
+          "descent_time": "下降时长（秒），0=禁用模拟位置，使用设备自带位置",
+          "enable_push": "启用实时推送（长连接，减少轮询）"
         }
       },
       "reconfigure": {
@@ -17,7 +18,8 @@
           "username": "用户名（手机号）",
           "password": "密码",
           "backup_username": "备用账号用户名（可选，用于 403 限频自动切换）",
-          "backup_password": "备用账号密码（留空保持不变）"
+          "backup_password": "备用账号密码（留空保持不变）",
+          "enable_push": "启用实时推送（长连接，减少轮询）"
         }
       }
     },

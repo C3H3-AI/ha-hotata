@@ -7,7 +7,8 @@
         "data": {
           "username": "Username (phone number)",
           "password": "Password",
-          "descent_time": "Full descent duration in seconds (0 = disable simulation, use device position)"
+          "descent_time": "Full descent duration in seconds (0 = disable simulation, use device position)",
+          "enable_push": "Enable realtime push (persistent connection, less polling)"
         }
       },
       "reconfigure": {
@@ -17,7 +18,8 @@
           "username": "Username (phone number)",
           "password": "Password",
           "backup_username": "Backup account username (optional, for 403 failover)",
-          "backup_password": "Backup account password (leave empty to keep current)"
+          "backup_password": "Backup account password (leave empty to keep current)",
+          "enable_push": "Enable realtime push (persistent connection, less polling)"
         }
       }
     },

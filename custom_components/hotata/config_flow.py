@@ -24,11 +24,13 @@ from .const import (
     CONF_BACKUP_PASSWORD,
     CONF_BACKUP_USERNAME,
     CONF_DESCENT_TIME,
+    CONF_ENABLE_PUSH,
     CONF_IOT_REFRESH_TOKEN,
     CONF_IOT_TOKEN,
     CONF_IDENTITY_ID,
     CONF_REGISTERED_ID,
     DEFAULT_DESCENT_TIME,
+    DEFAULT_ENABLE_PUSH,
     DOMAIN,
 )
 from .exceptions import (
@@ -143,6 +145,11 @@ class HotataAirerConfigFlow(ConfigFlow, domain=DOMAIN):
                                 CONF_DESCENT_TIME, DEFAULT_DESCENT_TIME
                             )
                         ),
+                        CONF_ENABLE_PUSH: bool(
+                            user_input.get(
+                                CONF_ENABLE_PUSH, DEFAULT_ENABLE_PUSH
+                            )
+                        ),
                         CONF_BACKUP_USERNAME: user_input.get(
                             CONF_BACKUP_USERNAME, ""
                         ).strip(),
@@ -160,6 +167,9 @@ class HotataAirerConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Required(
                     CONF_DESCENT_TIME, default=DEFAULT_DESCENT_TIME
                 ): vol.All(vol.Coerce(int), vol.Range(min=0, max=20)),
+                vol.Optional(
+                    CONF_ENABLE_PUSH, default=DEFAULT_ENABLE_PUSH
+                ): bool,
                 vol.Optional(CONF_BACKUP_USERNAME): str,
                 vol.Optional(CONF_BACKUP_PASSWORD): str,
             }
@@ -202,6 +212,14 @@ class HotataAirerConfigFlow(ConfigFlow, domain=DOMAIN):
                             CONF_BACKUP_PASSWORD, ""
                         )
                         or entry.data.get(CONF_BACKUP_PASSWORD, ""),
+                        CONF_ENABLE_PUSH: bool(
+                            user_input.get(
+                                CONF_ENABLE_PUSH,
+                                entry.data.get(
+                                    CONF_ENABLE_PUSH, DEFAULT_ENABLE_PUSH
+                                ),
+                            )
+                        ),
                         **creds,
                     },
                 )
@@ -225,6 +243,12 @@ class HotataAirerConfigFlow(ConfigFlow, domain=DOMAIN):
                     },
                 ): str,
                 vol.Optional(CONF_BACKUP_PASSWORD): str,
+                vol.Optional(
+                    CONF_ENABLE_PUSH,
+                    default=entry.data.get(
+                        CONF_ENABLE_PUSH, DEFAULT_ENABLE_PUSH
+                    ),
+                ): bool,
             }
         )
         return self.async_show_form(
