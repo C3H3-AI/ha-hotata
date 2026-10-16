@@ -419,6 +419,20 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
                         device.iot_id,
                     )
                     continue
+                if self.push_bound and not self.account.poll_active and warm:
+                    # 长连接已绑定且不在活动窗口：属性有 /thing/properties 推送、
+                    # 事件有 /thing/events 推送、上下线有 /thing/status 推送，
+                    # 这一轮兜底就只留在线探测。这正是长连接省下的那部分请求——
+                    # 账号曾因轮询过密被云端 403，绑定后每轮每设备从 2 次降到 1 次。
+                    # 这里把上一轮属性连同 TSL 一起带过来（对象每轮都会重建），
+                    # 推送写进去的值因此不会丢。
+                    device.properties = previous.properties
+                    device.thing_model = self.thing_models[cache_key]
+                    _LOGGER.debug(
+                        "Device %s push-bound and idle, skipping property poll",
+                        device.iot_id,
+                    )
+                    continue
                 try:
                     device.properties = await self.account.api.async_get_properties(
                         device.iot_id
@@ -498,7 +512,7 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
             if active:
                 wanted = fast
             elif self.push_bound:
-                # 属性变化走长连接推送：非活动期只需低频兜底（在线状态/TSL）
+                # 属性/事件/上下线都走长连接推送：非活动期只需低频在线探测
                 wanted = timedelta(seconds=POLL_INTERVAL_PUSH_FALLBACK)
             else:
                 wanted = slow

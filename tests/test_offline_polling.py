@@ -328,6 +328,74 @@ async def test_warm_all_offline_still_issues_only_probes():
             const.POLL_INTERVAL_OFFLINE)
 
 
+async def test_bound_push_skips_property_reads_when_idle():
+    """Long connection bound + idle window: only the connectivity probe runs.
+
+    The account was throttled (403 操作过于频繁) by polling density. Once the
+    long connection is bound, properties, events and online transitions all
+    arrive as pushes, so the fallback round must not re-read them — one request
+    per device instead of two.
+    """
+    devs = [device("d1")]
+    co, api = make_coordinator(devs, warm=True)
+    co.push_bound = True
+    data = await co._async_update_data()
+    R.check("bound idle: get_online called", len(api.calls_for("get_online", "d1")), 1)
+    R.check("bound idle: no get_properties", len(api.calls_for("get_properties")), 0)
+    R.check("bound idle: no event read", len(api.calls_for("get_latest_event")), 0)
+    R.check("bound idle: no thing model read", len(api.calls_for("get_thing_model")), 0)
+    R.check("bound idle: previous properties carried over",
+            data["d1"].properties.get("MotorControlMode"), 0)
+    R.check("bound idle: cached thing model still attached",
+            bool(data["d1"].thing_model.get("properties")), True)
+    R.check("bound idle: fallback cadence", co.update_interval.total_seconds(),
+            const.POLL_INTERVAL_PUSH_FALLBACK)
+
+
+async def test_bound_push_reads_properties_while_active():
+    """Right after a command the fast window still reads properties, so the
+    cover's simulated position keeps tracking the real motor."""
+    devs = [device("d1")]
+    co, api = make_coordinator(devs, warm=True)
+    co.push_bound = True
+    co.account.poll_active = True
+    await co._async_update_data()
+    R.check("bound active: get_properties called",
+            len(api.calls_for("get_properties", "d1")), 1)
+    R.check("bound active: fast cadence", co.update_interval.total_seconds(),
+            const.POLL_INTERVAL_FAST)
+
+
+async def test_unbound_push_still_reads_properties():
+    """Without a bound long connection the fallback must stay intact."""
+    devs = [device("d1")]
+    co, api = make_coordinator(devs, warm=True)
+    await co._async_update_data()
+    R.check("unbound: get_properties called",
+            len(api.calls_for("get_properties", "d1")), 1)
+    R.check("unbound: slow cadence", co.update_interval.total_seconds(),
+            const.POLL_INTERVAL_SLOW)
+
+
+async def test_bound_push_skips_reads_only_for_warm_devices():
+    """A cold device (no TSL, no properties yet) is still read while idle:
+    skipping it would leave has_property() with nothing to stand on."""
+    devs = [device("d1")]
+    devs[0].properties = {}
+    co, api = make_coordinator(devs)
+    co.push_bound = True
+    await co._async_update_data()
+    R.check("bound idle cold: get_properties called",
+            len(api.calls_for("get_properties", "d1")), 1)
+    R.check("bound idle cold: thing model read",
+            len(api.calls_for("get_thing_model", "d1")), 1)
+
+
+async def test_push_fallback_interval_is_five_minutes():
+    R.check("POLL_INTERVAL_PUSH_FALLBACK == 300",
+            const.POLL_INTERVAL_PUSH_FALLBACK, 300)
+
+
 async def test_offline_interval_is_thirty_seconds():
     R.check("POLL_INTERVAL_OFFLINE == 30", const.POLL_INTERVAL_OFFLINE, 30)
 
