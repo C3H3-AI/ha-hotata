@@ -91,6 +91,14 @@ FAILOVER_SETTLE_DELAY = 60
 SWITCH_BACK_PROBE_DELAY = 600
 SWITCH_BACK_PROBE_MAX = 3600
 
+# ---- 长连接推送（MQTT，实测 bind code=200） ----
+CONF_ENABLE_PUSH = "enable_push"
+DEFAULT_ENABLE_PUSH = True
+#: 绑定成功后的兜底轮询间隔（秒）：属性变化走推送，轮询仅兜底刷新在线状态/TSL
+POLL_INTERVAL_PUSH_FALLBACK = 60
+#: 推送未建立时的重试间隔（秒）
+PUSH_RETRY_INTERVAL = 300
+
 # ---- config entry keys (this project's own) ----
 
 CONF_USERNAME = "username"

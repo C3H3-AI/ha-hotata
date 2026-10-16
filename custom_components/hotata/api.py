@@ -50,6 +50,9 @@ from .models import HotataDevice
 
 _LOGGER = logging.getLogger(__name__)
 
+# aepauth：换取 App 侧长连接 MQTT 三元组（与 slac 同一网关协议）
+_AEP_AUTH_PATH = "/app/aepauth/handle"
+
 # Compared against the lower-cased key with "_" and "-" removed, so
 # accessToken / access_token / access-token all match.
 _SENSITIVE_RESPONSE_KEYS = {
@@ -628,3 +631,72 @@ class HotataApi:
                 "args": args or {},
             },
         )
+
+    async def async_aepauth(self) -> dict[str, str]:
+        """换取长连接 MQTT 三元组（productKey/deviceName/deviceSecret）。
+
+        来源：好太太 APP 的 /app/aepauth/handle（与 slac 同一网关协议，实测通过）。
+        外层用网关签名 _gateway_headers（HmacSHA256）；
+        内层 authInfo.sign = HmacSHA1(APP_SECRET, appKey+clientId+deviceSn+timestamp)
+        小写 hex（SHA256 会返回 430 签名不合法，实测 SHA1 才通）。
+        deviceSn/clientId 每次会话随机生成，无需持久化。
+        """
+        device_sn = uuid.uuid4().hex
+        client_id = uuid.uuid4().hex[:8]
+        timestamp = str(int(time.time() * 1000))
+        to_sign = (
+            "appKey" + APP_KEY
+            + "clientId" + client_id
+            + "deviceSn" + device_sn
+            + "timestamp" + timestamp
+        )
+        sign = hmac.new(
+            APP_SECRET.encode("utf-8"), to_sign.encode("utf-8"), hashlib.sha1
+        ).hexdigest()
+        body = json.dumps(
+            {
+                "id": str(uuid.uuid4()),
+                "version": "1.0",
+                "request": {"apiVer": "1.0.0"},
+                "params": {
+                    "authInfo": {
+                        "timestamp": timestamp,
+                        "clientId": client_id,
+                        "deviceSn": device_sn,
+                        "sign": sign,
+                    }
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+        try:
+            async with self._session.post(
+                f"https://{API_HOST}{_AEP_AUTH_PATH}",
+                data=body,
+                headers=self._gateway_headers(_AEP_AUTH_PATH, body),
+            ) as response:
+                result = await response.json(content_type=None)
+                status = response.status
+        except (ClientError, TimeoutError, ValueError) as err:
+            raise HotataConnectionError(str(err)) from err
+        code = result.get("code") if isinstance(result, dict) else None
+        if status != 200 or code not in (200, "200"):
+            message = (
+                _find_value(result, "message", "msg")
+                if isinstance(result, (dict, list))
+                else None
+            )
+            raise HotataError(
+                str(message or f"aepauth failed (code={code}, http={status})")
+            )
+        data = result.get("data") or {}
+        if not isinstance(data, dict) or not all(
+            data.get(k) for k in ("productKey", "deviceName", "deviceSecret")
+        ):
+            raise HotataError("aepauth response missing MQTT triple")
+        return {
+            "productKey": str(data["productKey"]),
+            "deviceName": str(data["deviceName"]),
+            "deviceSecret": str(data["deviceSecret"]),
+        }

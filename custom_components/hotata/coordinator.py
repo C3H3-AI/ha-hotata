@@ -19,6 +19,7 @@ capabilities it really exposes.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
@@ -31,17 +32,21 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .const import (
     CONF_DESCENT_TIME,
+    CONF_ENABLE_PUSH,
     DEFAULT_DESCENT_TIME,
     DOMAIN,
     EVENT_BUTTON_PRODUCT_KEYS,
     GATEWAY_PRODUCT_KEYS,
     POLL_INTERVAL_FAST,
     POLL_INTERVAL_OFFLINE,
+    POLL_INTERVAL_PUSH_FALLBACK,
     POLL_INTERVAL_SLOW,
+    PUSH_RETRY_INTERVAL,
 )
 from .exceptions import HotataAuthError, HotataError, HotataRateLimited
 from .hub import HotataAccount
 from .models import HotataDevice
+from .mqtt_push import HotataPushClient
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -128,6 +133,15 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
         self.thing_models: dict[str, dict] = {}
         self.runtimes: dict[str, DeviceRuntime] = {}
 
+        # 长连接推送（MQTT）
+        self.push_enabled: bool = bool(
+            entry.data.get(CONF_ENABLE_PUSH, True)
+        )
+        self.push_client: HotataPushClient | None = None
+        self.push_bound: bool = False
+        self._push_starting = False
+        self._last_push_retry = 0.0
+
     def runtime(self, iot_id: str) -> DeviceRuntime:
         """Return (and lazily create) the runtime state for one device."""
         runtime = self.runtimes.get(iot_id)
@@ -148,6 +162,103 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
         """The first discovered device id, for probing and status display."""
         data = self.data or {}
         return next(iter(data), None)
+
+    # ---------------- 长连接推送 ----------------
+
+    async def async_setup_push(self) -> None:
+        """启动长连接推送；失败则保持轮询并在后续轮询中按间隔重试"""
+        if not self.push_enabled or self._push_starting:
+            return
+        if self.push_client is not None and self.push_client.connected:
+            return
+        self._push_starting = True
+        try:
+            await self._async_setup_push_inner()
+        finally:
+            self._push_starting = False
+
+    async def _async_setup_push_inner(self) -> None:
+        # 确保有可用 iotToken（bind 需要）
+        if not self.account.api.iot_token:
+            try:
+                await self.account.api.async_refresh_iot_credential()
+            except Exception as e:  # noqa: BLE001
+                _LOGGER.debug("推送启动前刷新 token 失败: %s", e)
+        if not self.account.api.iot_token:
+            _LOGGER.warning("无可用 iotToken，跳过长连接推送启动")
+            return
+
+        try:
+            aepauth = await self.account.api.async_aepauth()
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.warning(
+                "aepauth 获取 MQTT 三元组失败（将保持轮询）: %s", e
+            )
+            self._last_push_retry = time.time()
+            return
+
+        client = HotataPushClient(
+            get_iot_token=lambda: self.account.api.iot_token or "",
+            on_properties_pushed=self._handle_properties_push,
+            on_bound=self._handle_push_bound,
+        )
+        try:
+            bound = await client.async_start(self.hass.loop, aepauth)
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.warning("长连接推送启动失败（将保持轮询）: %s", e)
+            self._last_push_retry = time.time()
+            return
+
+        self.push_client = client
+        self._last_push_retry = time.time()
+        self.push_bound = bound
+        if not bound:
+            _LOGGER.info("长连接已连接但未绑定，将保持轮询等待重试")
+
+    def _handle_push_bound(self, bound: bool) -> None:
+        """bind/unbind 状态变化（事件循环线程回调）"""
+        if bound == self.push_bound:
+            return
+        self.push_bound = bound
+        _LOGGER.info("长连接绑定状态 -> %s", "已绑定" if bound else "未绑定")
+        self._apply_push_interval()
+
+    def _apply_push_interval(self) -> None:
+        """按推送状态与活动窗口选择轮询节奏"""
+        if self.push_bound:
+            # 属性变化走推送：非活动期用兜底间隔，活动期仍走 fast
+            if not self.account.poll_active and self.update_interval != timedelta(
+                seconds=POLL_INTERVAL_PUSH_FALLBACK
+            ):
+                self.update_interval = timedelta(
+                    seconds=POLL_INTERVAL_PUSH_FALLBACK
+                )
+        # 未绑定时由 _adjust_poll_interval 的常规逻辑接管
+
+    def _handle_properties_push(self, iot_id: str, items: dict) -> None:
+        """收到设备属性推送（事件循环线程回调）：合并进缓存并立即通知实体"""
+        if not isinstance(items, dict) or not items:
+            return
+        data = self.data
+        if not data or iot_id not in data:
+            # 未知设备（或首轮前到达）：丢弃，交给下一次轮询发现
+            _LOGGER.debug("推送到来但设备未知，忽略: %s", iot_id)
+            return
+        device = data[iot_id]
+        merged = dict(device.properties or {})
+        for key, val in items.items():
+            merged[key] = val
+        device.properties = merged
+        # 同步写回 coordinator.data（同一对象引用，实体通过 self.coordinator.data 读取）
+        self.async_set_updated_data(data)
+
+    def async_stop_push(self) -> None:
+        """停掉长连接（可在任意线程调用，unload 时经 executor 执行）"""
+        client = self.push_client
+        self.push_client = None
+        self.push_bound = False
+        if client is not None:
+            client.stop()
 
     async def _async_discover_devices(self) -> list[HotataDevice]:
         """Discover direct bindings and recursively exposed gateway children."""
@@ -186,6 +297,13 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
         return list(by_id.values())
 
     async def _async_update_data(self) -> dict[str, HotataDevice]:
+        # 长连接未建立/已失效：按间隔重建（有存活客户端时交给 paho 自动重连）
+        if (
+            self.push_enabled
+            and (self.push_client is None or not self.push_client.connected)
+            and time.time() - self._last_push_retry >= PUSH_RETRY_INTERVAL
+        ):
+            await self.async_setup_push()
         if self.account.rate_limited:
             # Silence window: issue zero requests, keep last known data.
             _LOGGER.debug("Rate limited, skipping poll entirely")
@@ -312,7 +430,13 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
             wanted = offline_interval
         else:
             active = moving or self.account.poll_active
-            wanted = fast if active else slow
+            if active:
+                wanted = fast
+            elif self.push_bound:
+                # 属性变化走长连接推送：非活动期只需低频兜底（在线状态/TSL）
+                wanted = timedelta(seconds=POLL_INTERVAL_PUSH_FALLBACK)
+            else:
+                wanted = slow
         if self.update_interval != wanted:
             self.update_interval = wanted
             _LOGGER.debug(

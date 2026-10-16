@@ -85,6 +85,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     account.coordinator = coordinator
     await coordinator.async_config_entry_first_refresh()
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+    # 启动长连接推送（后台任务，失败不阻塞配置项加载，轮询兜底）
+    if coordinator.push_enabled:
+        hass.async_create_background_task(
+            coordinator.async_setup_push(), "hotata_push_setup"
+        )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     if not hass.services.has_service(DOMAIN, SERVICE_SET_PROPERTY):
@@ -302,6 +307,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.entry_id, None
         )
         if coordinator is not None:
+            # stop() 内含 paho 网络收尾与 sleep，放线程池避免阻塞事件循环
+            await hass.async_add_executor_job(coordinator.async_stop_push)
             await coordinator.account.async_unload()
         if not hass.data[DOMAIN]:
             hass.services.async_remove(DOMAIN, SERVICE_SET_PROPERTY)
