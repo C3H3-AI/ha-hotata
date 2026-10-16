@@ -115,6 +115,14 @@ class DeviceRuntime:
 class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
     """Keep device metadata, online state and properties fresh."""
 
+    # 长连接推送（MQTT）的默认状态，__init__ 会按配置条目覆盖 push_enabled。
+    # 声明在类上，使绕过 __init__ 构造的协程（测试桩）不会缺字段。
+    push_enabled: bool = False
+    push_client: HotataPushClient | None = None
+    push_bound: bool = False
+    _push_starting: bool = False
+    _last_push_retry: float = 0.0
+
     def __init__(
         self,
         hass: HomeAssistant,
@@ -201,6 +209,8 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
             get_iot_token=lambda: self.account.api.iot_token or "",
             on_properties_pushed=self._handle_properties_push,
             on_bound=self._handle_push_bound,
+            on_status_pushed=self._handle_status_push,
+            on_event_pushed=self._handle_event_push,
         )
         try:
             bound = await client.async_start(self.hass.loop, aepauth)
@@ -251,6 +261,61 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
         device.properties = merged
         # 同步写回 coordinator.data（同一对象引用，实体通过 self.coordinator.data 读取）
         self.async_set_updated_data(data)
+
+    def _handle_status_push(self, iot_id: str, online: bool) -> None:
+        """收到设备上下线推送（事件循环线程回调）：实时更新在线状态"""
+        data = self.data
+        if not data or iot_id not in data:
+            _LOGGER.debug("上下线推送到来但设备未知，忽略: %s", iot_id)
+            return
+        device = data[iot_id]
+        if device.online == online:
+            return
+        device.online = online
+        _LOGGER.debug("设备在线状态推送更新 iot_id=%s online=%s", iot_id, online)
+        self.async_set_updated_data(data)
+        # 上线瞬间补齐属性（离线期跳过的轮询），离线则无需拉取
+        if online:
+            self.hass.async_create_task(self._async_refresh_device(iot_id))
+
+    def _handle_event_push(self, iot_id: str, info: dict) -> None:
+        """收到设备事件推送（事件循环线程回调）：写入事件流供 Event 实体触发"""
+        data = self.data
+        if not data or iot_id not in data:
+            _LOGGER.debug("事件推送到来但设备未知，忽略: %s", iot_id)
+            return
+        device = data[iot_id]
+        identifier = info.get("identifier")
+        if not identifier:
+            return
+        event_data = info.get("data")
+        if not isinstance(event_data, dict):
+            event_data = {"value": event_data}
+        merged = dict(device.properties or {})
+        merged[identifier] = {
+            "value": event_data,
+            "time": info.get("time"),
+        }
+        device.properties = merged
+        _LOGGER.debug(
+            "设备事件推送写入 iot_id=%s identifier=%s", iot_id, identifier
+        )
+        self.async_set_updated_data(data)
+
+    async def _async_refresh_device(self, iot_id: str) -> None:
+        """单设备属性即时刷新（上下线推送触发，避免全量轮询）"""
+        data = self.data
+        if not data or iot_id not in data:
+            return
+        device = data[iot_id]
+        try:
+            props = await self.account.api.async_get_properties(iot_id)
+        except HotataError as err:
+            _LOGGER.debug("即时属性刷新失败 %s: %s", iot_id, err)
+            return
+        if props:
+            device.properties = props
+            self.async_set_updated_data(data)
 
     def async_stop_push(self) -> None:
         """停掉长连接（可在任意线程调用，unload 时经 executor 执行）"""
