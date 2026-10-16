@@ -34,8 +34,15 @@ CAP_NIGHT_LIGHT = "night_light"
 CAP_CCT_LIGHT = "cct_light"
 CAP_NATURAL_WIND = "natural_wind"
 CAP_DOUBLE_POLE = "double_pole"
+CAP_ROUTE_DIY1 = "route_diy1"
+CAP_ROUTE_DIY2 = "route_diy2"
+CAP_SENSOR_NIGHT_LIGHT = "sensor_night_light"
+CAP_SENSOR_LIGHT = "sensor_light"
+CAP_T_POLE = "t_pole"
 CAP_LIGHT_MODE = "light_mode"
 CAP_DRYING_MODE = "drying_mode"
+CAP_VOICE_BROADCAST = "voice_broadcast"
+CAP_CUSTOM_TIME = "custom_time"
 CAP_VOICE = "voice"
 CAP_SOLAR_TRACE = "solar_trace"
 CAP_SUN_TRACE = "sun_trace"
@@ -48,22 +55,22 @@ FUN_INDEX: dict[str, int] = {
     CAP_AIR_DRYING: 7,
     CAP_DRYING: 8,
     CAP_BRIGHTNESS: 10,
-    "route_diy1": 14,
-    "route_diy2": 15,
-    "sensor_night_light": 17,
-    "sensor_light": 18,
+    CAP_ROUTE_DIY1: 14,
+    CAP_ROUTE_DIY2: 15,
+    CAP_SENSOR_NIGHT_LIGHT: 17,
+    CAP_SENSOR_LIGHT: 18,
     CAP_VOICE: 20,
     CAP_NIGHT_LIGHT: 22,
     CAP_CCT_LIGHT: 23,
     CAP_DOUBLE_POLE: 24,
     CAP_SOLAR_TRACE: 25,
-    "t_pole": 26,
+    CAP_T_POLE: 26,
     CAP_LIGHT_MODE: 27,
     CAP_DRYING_MODE: 28,
-    "voice_broadcast": 29,
+    CAP_VOICE_BROADCAST: 29,
     CAP_NATURAL_WIND: 30,
     CAP_SUN_TRACE: 31,
-    "custom_time": 32,
+    CAP_CUSTOM_TIME: 32,
 }
 
 #: ``DeviceModelType`` semantics from the cloud TSL, expressed as capabilities.

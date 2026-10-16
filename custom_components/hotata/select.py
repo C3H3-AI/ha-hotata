@@ -11,14 +11,28 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .capabilities import (
+    CAP_AIR_DRYING,
+    CAP_DRYING,
+    CAP_DRYING_MODE,
+    CAP_LIGHT_MODE,
+    supported,
+)
 from .const import (
     BROADCAST_PRODUCT_KEYS,
     CAMERA_PRODUCT_KEYS,
     CLOTHES_CARE_PRODUCT_KEYS,
     DOMAIN,
+    FAMILY_AIRER,
+    product_family,
 )
 from .coordinator import HotataCoordinator
-from .entity import HotataEntity, async_setup_dynamic_entities, entity_identity
+from .entity import (
+    HotataEntity,
+    async_setup_dynamic_entities,
+    entity_identity,
+    remove_stale_entity,
+)
 from .tsl import enum_values, is_writable_property
 
 _LOGGER = logging.getLogger(__name__)
@@ -39,6 +53,22 @@ EXTRA_ENUM_PROPERTIES = {
     },
 }
 
+# Airer enum controls discovered from the device's own TSL: the identifier must
+# be declared writable and carry an enum. Where the vendor's FUN_INDEX table has
+# a bit for the function a property drives, that bit gets the last word — the
+# D-3072S declares 烘干/风干运行时间 in its product-line TSL while its function
+# list has no drying bit, i.e. a declaration is a template, not hardware. The
+# entries without a capability (人体感应) have no bit at all; the device's own
+# declaration is then the only evidence, exactly as for the best-position
+# switches in switch.py.
+AIRER_ENUM_PROPERTIES: tuple[tuple[str, str, str | None], ...] = (
+    ("LightMode", "照明模式", CAP_LIGHT_MODE),
+    ("DryingMode", "烘干模式", CAP_DRYING_MODE),
+    ("DryingRunningTime", "烘干运行时间", CAP_DRYING),
+    ("AirDryingRunningTime", "风干打开时间", CAP_AIR_DRYING),
+    ("BodyInductionSensitivitySwitch", "人体感应灵敏度", None),
+)
+
 
 def _entities(coordinator: HotataCoordinator, device) -> Iterable[SelectEntity]:
     definitions = []
@@ -50,6 +80,23 @@ def _entities(coordinator: HotataCoordinator, device) -> Iterable[SelectEntity]:
         values = enum_values(device, identifier)
         if values and is_writable_property(device, identifier):
             yield HotataEnumSelect(coordinator, device, identifier, name, values)
+
+    # Airers additionally get the enum controls their own model declares. A
+    # capability that cannot be resolved creates the entity rather than guessing
+    # it away; one the device states it lacks removes an entry an earlier
+    # version (or a poll that ran before the first report) left behind.
+    if product_family(device.product_key) not in (None, FAMILY_AIRER):
+        return
+    for identifier, name, capability in AIRER_ENUM_PROPERTIES:
+        if not is_writable_property(device, identifier):
+            continue
+        values = enum_values(device, identifier)
+        if not values:
+            continue
+        if not supported(device, capability):
+            remove_stale_entity(coordinator.hass, device, "select", identifier)
+            continue
+        yield HotataEnumSelect(coordinator, device, identifier, name, values)
 
 
 async def async_setup_entry(

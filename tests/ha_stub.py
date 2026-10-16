@@ -407,6 +407,18 @@ sw.SwitchEntity = SwitchEntity
 comp.switch = sw
 
 
+# ---- select platform support (capability-gated enum tests) ----
+
+sel = mod('homeassistant.components.select')
+class SelectEntityDescription(EntityDescription):
+    pass
+class SelectEntity(_StateWriter):
+    _attr_has_entity_name = True
+sel.SelectEntityDescription = SelectEntityDescription
+sel.SelectEntity = SelectEntity
+comp.select = sel
+
+
 # ---- sensor platform + const names (offline entity-presence tests) ----
 
 cn = mod('homeassistant.const')
