@@ -94,8 +94,9 @@ SWITCH_BACK_PROBE_MAX = 3600
 # ---- 长连接推送（MQTT，实测 bind code=200） ----
 CONF_ENABLE_PUSH = "enable_push"
 DEFAULT_ENABLE_PUSH = True
-#: 绑定成功后的兜底轮询间隔（秒）：属性变化走推送，轮询仅兜底刷新在线状态/TSL
-POLL_INTERVAL_PUSH_FALLBACK = 60
+#: 绑定成功且不在活动窗口时的兜底轮询间隔（秒）：属性、事件、上下线三者都有
+#: 推送，这一轮只探在线，把请求量压到最低（账号曾因轮询过密吃 403）
+POLL_INTERVAL_PUSH_FALLBACK = 300
 #: 推送未建立时的重试间隔（秒）
 PUSH_RETRY_INTERVAL = 300
 
