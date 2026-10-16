@@ -49,6 +49,7 @@ from hotata.capabilities import (  # noqa: E402
     supports,
 )
 from hotata.models import HotataDevice  # noqa: E402
+from hotata.select import _entities as select_entities  # noqa: E402
 from hotata.switch import _switches_for_device  # noqa: E402
 
 R_PASS = 0
@@ -144,8 +145,33 @@ def make_device(properties, product_key="a1kM9JAZ7aQ", tsl_ids=()):
         online=True,
         raw={"productName": "X"},
         properties=dict(properties),
-        thing_model={"properties": [{"identifier": i} for i in tsl_ids]},
+        thing_model={
+            "properties": [
+                entry if isinstance(entry, dict) else {"identifier": entry}
+                for entry in tsl_ids
+            ]
+        },
     )
+
+
+def bits(*indexes):
+    """Build a ModelFunctionList with the given FUN_INDEX positions set."""
+    chars = ["0"] * 32
+    for index in indexes:
+        chars[len(chars) - index] = "1"
+    return "".join(chars)
+
+
+def tsl_enum(identifier, options, access="rw"):
+    """A TSL declaration for an enum property, wire value -> label."""
+    return {
+        "identifier": identifier,
+        "accessMode": access,
+        "dataType": {
+            "type": "enum",
+            "specs": {str(key): value for key, value in options.items()},
+        },
+    }
 
 
 class FakeCoordinator:
@@ -157,6 +183,11 @@ class FakeCoordinator:
 def switch_keys(device):
     co = FakeCoordinator(device)
     return [e.entity_description.key for e in _switches_for_device(co, device)]
+
+
+def select_keys(device):
+    co = FakeCoordinator(device)
+    return [e._identifier for e in select_entities(co, device)]
 
 
 TSL_AIRER = (
@@ -236,6 +267,94 @@ def test_standard_model_2_still_exact():
     check("model 2 no drying", "DryingSwitch" in keys, False)
     check("model 2 no air drying", "AirDryingSwitch" in keys, False)
     check("model 2 no ions", "IonsSwitch" in keys, False)
+
+
+def test_advanced_switches_have_no_bit_and_are_declaration_gated():
+    """轻抬上升 / 夜灯功能 / 人体感应夜灯 come from the advanced airer TSL."""
+    device = make_device(
+        {
+            "PowerSwitch": 1,
+            "BodyInductionLightSwitch": 0,
+            "ModelFunctionList": D3072S_FUNCTION_LIST,
+        },
+        product_key="a1abYBCSVlV",
+        tsl_ids=TSL_AIRER
+        + (
+            "StokeUpSwitch",
+            "NightLightFunctionSwitch",
+            "BodyInductionLightSwitch",
+        ),
+    )
+    keys = switch_keys(device)
+    check("light raise created", "StokeUpSwitch" in keys, True)
+    check("night lamp created", "NightLightFunctionSwitch" in keys, True)
+    check("body induction lamp created", "BodyInductionLightSwitch" in keys, True)
+    check("drying still suppressed", "DryingSwitch" in keys, False)
+
+
+def test_advanced_switches_stay_off_standard_airers():
+    device = make_device(
+        {"PowerSwitch": 1, "ModelFunctionList": bits(5, 6)},
+        tsl_ids=TSL_AIRER + ("StokeUpSwitch",),
+    )
+    check("no light raise on V1", "StokeUpSwitch" in switch_keys(device), False)
+
+
+def test_enum_select_follows_the_bit_table():
+    """A declared running-time control needs the bit that drives its function."""
+    device = make_device(
+        {"ModelFunctionList": bits(8)},
+        product_key="a1abYBCSVlV",
+        tsl_ids=(tsl_enum("DryingRunningTime", {0: "默认120分钟", 1: "30分钟"}),),
+    )
+    check("drying time select", select_keys(device), ["DryingRunningTime"])
+
+
+def test_enum_select_is_refused_without_the_bit():
+    """The D-3072S declares 烘干运行时间 but its function list has no drying."""
+    device = make_device(
+        {"ModelFunctionList": D3072S_FUNCTION_LIST},
+        product_key="a1abYBCSVlV",
+        tsl_ids=(
+            tsl_enum("DryingRunningTime", {0: "默认120分钟"}),
+            tsl_enum("AirDryingRunningTime", {0: "默认180分钟"}),
+        ),
+    )
+    check("no drying select", select_keys(device), [])
+
+
+def test_enum_select_without_a_bit_is_allowed():
+    device = make_device(
+        {},
+        product_key="a1abYBCSVlV",
+        tsl_ids=(
+            tsl_enum(
+                "BodyInductionSensitivitySwitch",
+                {1: "低", 2: "中", 3: "高"},
+            ),
+        ),
+    )
+    check(
+        "sensitivity select", select_keys(device), ["BodyInductionSensitivitySwitch"]
+    )
+
+
+def test_read_only_enum_stays_a_sensor():
+    device = make_device(
+        {"ModelFunctionList": bits(8)},
+        product_key="a1abYBCSVlV",
+        tsl_ids=(tsl_enum("DryingRunningTime", {0: "默认120分钟"}, access="r"),),
+    )
+    check("read-only enum is not a control", select_keys(device), [])
+
+
+def test_enum_discovery_stays_off_other_families():
+    device = make_device(
+        {},
+        product_key="a15KqYh4n2f",
+        tsl_ids=(tsl_enum("DryingRunningTime", {0: "默认", 1: "30分钟"}),),
+    )
+    check("non-airer untouched", select_keys(device), [])
 
 
 def main():

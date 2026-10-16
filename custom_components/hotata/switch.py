@@ -129,6 +129,23 @@ ADVANCED_AIRER_SWITCHES = (
         name="最佳晾晒位",
         icon="mdi:sun-angle-outline",
     ),
+    # 轻抬上升 / 夜灯功能 / 人体感应夜灯 are writable booleans of the advanced
+    # airers. None of them has a FUN_INDEX bit — the mini-program build the
+    # table comes from has no button for them — so the device's own declaration
+    # is the only evidence available, as for the two position switches above.
+    HotataSwitchDescription(
+        key="StokeUpSwitch", name="轻抬上升", icon="mdi:arrow-up-bold"
+    ),
+    HotataSwitchDescription(
+        key="NightLightFunctionSwitch",
+        name="夜灯功能",
+        icon="mdi:weather-night",
+    ),
+    HotataSwitchDescription(
+        key="BodyInductionLightSwitch",
+        name="人体感应夜灯",
+        icon="mdi:motion-sensor",
+    ),
 )
 
 

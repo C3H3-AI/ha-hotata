@@ -60,10 +60,14 @@ class HotataPushClient:
         get_iot_token: Callable[[], str],
         on_properties_pushed: Callable[[str, dict], None],
         on_bound: Callable[[bool], None] | None = None,
+        on_status_pushed: Callable[[str, bool], None] | None = None,
+        on_event_pushed: Callable[[str, dict], None] | None = None,
     ) -> None:
         self._get_iot_token = get_iot_token
         self._on_properties_pushed = on_properties_pushed
         self._on_bound = on_bound
+        self._on_status_pushed = on_status_pushed
+        self._on_event_pushed = on_event_pushed
 
         self._client: mqtt.Client | None = None
         self._product_key = ""
@@ -244,17 +248,73 @@ class HotataPushClient:
         if "/account/unbind_reply" in topic:
             return
 
-        if "/thing/properties" in topic:
-            parsed = _parse_properties_push(body)
-            if parsed:
-                iot_id, items = parsed
-                self._call_in_loop(lambda: self._on_properties_pushed(iot_id, items))
+        if "/thing/status" in topic:
+            self._parse_status_push(body)
             return
 
-        if "/thing/status" in topic or "/thing/events" in topic:
-            # 设备上下线/事件：无法合并到属性，记日志即可（轮询兜底会刷新）
-            _LOGGER.debug("长连接收到状态/事件消息: %s", topic)
+        if "/thing/events" in topic:
+            self._parse_events_push(topic, body)
             return
+
+        _LOGGER.debug("长连接收到其他消息: %s", topic)
+
+    def _parse_status_push(self, body: str) -> None:
+        """解析 thing.status 上下线推送 → 通知 coordinator 实时更新在线状态"""
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            return
+        params = data.get("params")
+        if not isinstance(params, dict):
+            return
+        iot_id = params.get("iotId") or data.get("iotId") or ""
+        # status: "online"/"offline"；也有 weird 的 "unknown"
+        status = str(params.get("status", "")).lower()
+        if not iot_id or status not in ("online", "offline"):
+            _LOGGER.debug("忽略上下线推送 iotId=%s status=%s", iot_id, status)
+            return
+        online = status == "online"
+        _LOGGER.debug("收到上下线推送 iotId=%s online=%s", iot_id, online)
+        if self._on_status_pushed is not None:
+            self._call_in_loop(lambda: self._on_status_pushed(iot_id, online))
+
+    def _parse_events_push(self, topic: str, body: str) -> None:
+        """解析 thing.events 推送 → 通知 coordinator 写入事件流"""
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            return
+        params = data.get("params")
+        if not isinstance(params, dict):
+            return
+        iot_id = params.get("iotId") or data.get("iotId") or ""
+        method = params.get("method") or ""
+        # method 形如 thing.event.KeyEvent 或从 topic 推断
+        identifier = ""
+        if "." in str(method):
+            identifier = str(method).rsplit(".", 1)[-1]
+        elif "/thing/events" in topic:
+            # 兜底：topic 形如 /{pk}/{dn}/thing/events → 用 identifier 字段
+            identifier = str(params.get("identifier") or "")
+        if not iot_id or not identifier:
+            _LOGGER.debug("忽略事件推送 iotId=%s method=%s", iot_id, method)
+            return
+        # 事件数据：outputData/事件值
+        event_data = params.get("outputData") or params.get("value") or {}
+        if isinstance(event_data, str):
+            try:
+                event_data = json.loads(event_data)
+            except json.JSONDecodeError:
+                event_data = {"raw": event_data}
+        info = {
+            "identifier": identifier,
+            "data": event_data,
+            "time": params.get("time") or data.get("time"),
+            "iotId": iot_id,
+        }
+        _LOGGER.debug("收到事件推送 iotId=%s event=%s", iot_id, info)
+        if self._on_event_pushed is not None:
+            self._call_in_loop(lambda: self._on_event_pushed(iot_id, info))
 
     def _call_in_loop(self, func) -> None:
         """把回调切回 HA 事件循环执行（paho 回调在后台线程）"""
