@@ -192,3 +192,21 @@ def supported(device: Any, capability: str | None) -> bool:
         return True
     resolved = resolve(device)
     return True if resolved is None else resolved.has(capability)
+
+
+def declared_without_bit(device: Any, identifier: str) -> bool:
+    """True when the device itself reports ``identifier``.
+
+    For a handful of airer properties the vendor's function table (FUN_INDEX)
+    has no bit at all — 轻抬上升, 夜灯功能, 人体感应, 人体感应夜灯. Nothing in
+    the bit string can speak for them, and the TSL is a per-product-line
+    template: a D-3072S (whose table says 夜灯 = off) still declares
+    NightLightFunctionSwitch as writable. So the only remaining evidence is the
+    property report, where a device that really has the function publishes it
+    (the same D-3072S does report BestPickUpPositionSwitch = 1).
+
+    Callers use this to gate the bit-less properties: create the entity only
+    when the device declares it, rather than on a template declaration alone.
+    """
+    properties = getattr(device, "properties", None) or {}
+    return str(identifier) in properties

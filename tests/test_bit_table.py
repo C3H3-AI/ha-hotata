@@ -269,8 +269,12 @@ def test_standard_model_2_still_exact():
     check("model 2 no ions", "IonsSwitch" in keys, False)
 
 
-def test_advanced_switches_have_no_bit_and_are_declaration_gated():
-    """轻抬上升 / 夜灯功能 / 人体感应夜灯 come from the advanced airer TSL."""
+def test_advanced_switches_follow_the_function_table():
+    """夜灯/人体感应夜灯 have real bits (22/17); 轻抬上升 has none (see next).
+
+    The D-3072S declares all three in its TSL while its own function list says
+    夜灯 = 0, so the declaration alone must not create them.
+    """
     device = make_device(
         {
             "PowerSwitch": 1,
@@ -286,9 +290,12 @@ def test_advanced_switches_have_no_bit_and_are_declaration_gated():
         ),
     )
     keys = switch_keys(device)
-    check("light raise created", "StokeUpSwitch" in keys, True)
-    check("night lamp created", "NightLightFunctionSwitch" in keys, True)
-    check("body induction lamp created", "BodyInductionLightSwitch" in keys, True)
+    check("light raise withheld (no bit, not reported)",
+          "StokeUpSwitch" in keys, False)
+    check("night lamp withheld (bit 22 = 0)",
+          "NightLightFunctionSwitch" in keys, False)
+    check("body induction lamp withheld (bit 17 = 0)",
+          "BodyInductionLightSwitch" in keys, False)
     check("drying still suppressed", "DryingSwitch" in keys, False)
 
 
@@ -323,8 +330,9 @@ def test_enum_select_is_refused_without_the_bit():
     check("no drying select", select_keys(device), [])
 
 
-def test_enum_select_without_a_bit_is_allowed():
-    device = make_device(
+def test_enum_select_without_a_bit_needs_the_device_report():
+    """人体感应灵敏度 has no bit; only the device's own report can justify it."""
+    absent = make_device(
         {},
         product_key="a1abYBCSVlV",
         tsl_ids=(
@@ -334,8 +342,22 @@ def test_enum_select_without_a_bit_is_allowed():
             ),
         ),
     )
+    check("sensitivity select withheld", select_keys(absent), [])
+
+    reported = make_device(
+        {"BodyInductionSensitivitySwitch": 2},
+        product_key="a1abYBCSVlV",
+        tsl_ids=(
+            tsl_enum(
+                "BodyInductionSensitivitySwitch",
+                {1: "低", 2: "中", 3: "高"},
+            ),
+        ),
+    )
     check(
-        "sensitivity select", select_keys(device), ["BodyInductionSensitivitySwitch"]
+        "sensitivity select created when reported",
+        select_keys(reported),
+        ["BodyInductionSensitivitySwitch"],
     )
 
 

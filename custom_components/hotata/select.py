@@ -12,6 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .capabilities import (
+    declared_without_bit,
     CAP_AIR_DRYING,
     CAP_DRYING,
     CAP_DRYING_MODE,
@@ -93,7 +94,15 @@ def _entities(coordinator: HotataCoordinator, device) -> Iterable[SelectEntity]:
         values = enum_values(device, identifier)
         if not values:
             continue
-        if not supported(device, capability):
+        if capability is None:
+            # 厂商功能表里没有对应位（同 switch.py 的 needs_declaration）：
+            # 只有设备自己上报这个属性才算有，否则不建。
+            if not declared_without_bit(device, identifier):
+                remove_stale_entity(
+                    coordinator.hass, device, "select", identifier
+                )
+                continue
+        elif not supported(device, capability):
             remove_stale_entity(coordinator.hass, device, "select", identifier)
             continue
         yield HotataEnumSelect(coordinator, device, identifier, name, values)

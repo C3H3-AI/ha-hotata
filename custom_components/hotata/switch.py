@@ -18,6 +18,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .capabilities import (
+    CAP_SENSOR_NIGHT_LIGHT,
+    CAP_SENSOR_LIGHT,
+    CAP_NIGHT_LIGHT,
+    declared_without_bit,
     CAP_AIR_DRYING,
     CAP_DISINFECTION,
     CAP_DRYING,
@@ -60,6 +64,11 @@ class HotataSwitchDescription(SwitchEntityDescription):
     #: Optional airer capability this switch belongs to (see capabilities.py).
     #: None means the switch is not capability-gated.
     capability: str | None = None
+    #: Airer functions the vendor's function table (FUN_INDEX) has no bit for.
+    #: The TSL declares them per product line, so a declaration alone would put
+    #: 夜灯 on a machine whose table says it has none; only the device's own
+    #: report counts. See capabilities.declared_without_bit.
+    needs_declaration: bool = False
 
 
 AIRER_SWITCHES: tuple[HotataSwitchDescription, ...] = (
@@ -97,7 +106,8 @@ AIRER_SWITCHES: tuple[HotataSwitchDescription, ...] = (
 
 ADVANCED_AIRER_SWITCHES = (
     HotataSwitchDescription(
-        key="BodyInductionSwitch", name="人体感应", icon="mdi:motion-sensor"
+        key="BodyInductionSwitch", name="人体感应", icon="mdi:motion-sensor",
+        capability=CAP_SENSOR_LIGHT
     ),
     HotataSwitchDescription(
         key="SolarTraceSwitch",
@@ -134,17 +144,20 @@ ADVANCED_AIRER_SWITCHES = (
     # table comes from has no button for them — so the device's own declaration
     # is the only evidence available, as for the two position switches above.
     HotataSwitchDescription(
-        key="StokeUpSwitch", name="轻抬上升", icon="mdi:arrow-up-bold"
+        key="StokeUpSwitch", name="轻抬上升", icon="mdi:arrow-up-bold",
+        needs_declaration=True
     ),
     HotataSwitchDescription(
         key="NightLightFunctionSwitch",
         name="夜灯功能",
         icon="mdi:weather-night",
+        capability=CAP_NIGHT_LIGHT,
     ),
     HotataSwitchDescription(
         key="BodyInductionLightSwitch",
         name="人体感应夜灯",
         icon="mdi:motion-sensor",
+        capability=CAP_SENSOR_NIGHT_LIGHT,
     ),
 )
 
@@ -167,6 +180,18 @@ def _airer_model_supported(device, description: HotataSwitchDescription) -> bool
     """
     if not has_property(device, description.key):
         return False
+    if description.needs_declaration:
+        # 厂商功能表里没有这个功能位，TSL 又是按产品线的模板声明
+        # （D-3072S 的表说夜灯=0，TSL 仍声明可写）。只有设备自己上报才算数，
+        # 否则会给没有夜灯的机器凭空加一个开关。
+        if not declared_without_bit(device, description.key):
+            _LOGGER.debug(
+                "Skipping %s: no function bit and device %s does not report it",
+                description.key,
+                device.device_name or device.iot_id,
+            )
+            return False
+        return True
     if description.capability is None:
         return True
     capabilities = resolve(device)
