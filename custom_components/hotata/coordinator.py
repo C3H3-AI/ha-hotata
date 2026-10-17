@@ -185,6 +185,32 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
         finally:
             self._push_starting = False
 
+    async def _async_rebuild_push_if_stale(self) -> None:
+        """Rebuild the long connection when it is missing or its token is stale.
+
+        A bound connection keeps its account binding only for the iotToken it
+        was bound with: once the token rotates, pushes silently stop arriving
+        while the socket still looks healthy. Comparing the token we bound with
+        against the current one turns that silent degradation into a rebuild.
+        """
+        if not self.push_enabled:
+            return
+        client = self.push_client
+        rotated = bool(
+            client is not None
+            and client.bound_token
+            and self.account.api.iot_token
+            and client.bound_token != self.account.api.iot_token
+        )
+        if rotated:
+            _LOGGER.info("iotToken 已轮换，重建长连接以重新绑定账号")
+            self.async_stop_push()
+            client = None
+        if (client is None or not client.connected) and (
+            time.time() - self._last_push_retry >= PUSH_RETRY_INTERVAL
+        ):
+            await self.async_setup_push()
+
     async def _async_setup_push_inner(self) -> None:
         # 确保有可用 iotToken（bind 需要）
         if not self.account.api.iot_token:
@@ -363,12 +389,7 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
 
     async def _async_update_data(self) -> dict[str, HotataDevice]:
         # 长连接未建立/已失效：按间隔重建（有存活客户端时交给 paho 自动重连）
-        if (
-            self.push_enabled
-            and (self.push_client is None or not self.push_client.connected)
-            and time.time() - self._last_push_retry >= PUSH_RETRY_INTERVAL
-        ):
-            await self.async_setup_push()
+        await self._async_rebuild_push_if_stale()
         if self.account.rate_limited:
             # Silence window: issue zero requests, keep last known data.
             _LOGGER.debug("Rate limited, skipping poll entirely")

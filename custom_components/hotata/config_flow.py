@@ -16,6 +16,7 @@ from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlow,
     ConfigFlowResult,
+    OptionsFlow,
 )
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 
@@ -266,3 +267,40 @@ class HotataLoginError(Exception):
         super().__init__(error_key)
         self.error_key = error_key
         self.server_message = server_message
+
+
+class HotataOptionsFlow(OptionsFlow):
+    """Let an existing entry turn the long connection on or off.
+
+    Without this, `enable_push` could only be chosen while adding the
+    integration, so a user who wanted to try (or stop) push had to delete the
+    entry and sign in again.
+    """
+
+    async def async_step_init(self, user_input=None):
+        if user_input is not None:
+            current = dict(self.config_entry.data)
+            current[CONF_ENABLE_PUSH] = bool(
+                user_input.get(CONF_ENABLE_PUSH, DEFAULT_ENABLE_PUSH)
+            )
+            self.hass.config_entries.async_update_entry(
+                self.config_entry, data=current
+            )
+            return self.async_create_entry(title="", data={})
+
+        current = bool(
+            self.config_entry.data.get(CONF_ENABLE_PUSH, DEFAULT_ENABLE_PUSH)
+        )
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_ENABLE_PUSH, default=current): bool,
+                }
+            ),
+        )
+
+
+async def async_get_options_flow(entry: ConfigEntry) -> HotataOptionsFlow:
+    """Expose the options flow (HA calls this on the entry)."""
+    return HotataOptionsFlow()

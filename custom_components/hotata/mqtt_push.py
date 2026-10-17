@@ -41,6 +41,27 @@ RECONNECT_DELAY_MIN = 1
 RECONNECT_DELAY_MAX = 60
 
 
+def _mqtt_has_v2_api() -> bool:
+    """True when paho exposes the 2.x callback API.
+
+    paho 1.x has no ``CallbackAPIVersion`` (and 1.6.1 is what many systems
+    carry, including installs alongside HA's own MQTT integration), so the
+    client is built for whichever API is present instead of assuming 2.x.
+    """
+    return hasattr(mqtt, "CallbackAPIVersion")
+
+
+def _new_client(client_id: str) -> mqtt.Client:
+    """Build a paho client for whichever callback API is installed."""
+    if _mqtt_has_v2_api():
+        return mqtt.Client(
+            client_id=client_id,
+            protocol=mqtt.MQTTv311,
+            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+        )
+    return mqtt.Client(client_id=client_id, protocol=mqtt.MQTTv311)
+
+
 def _make_password(device_secret: str, product_key: str, device_name: str, base_id: str) -> str:
     """阿里云 IoT MQTT 密码：按 key 排序拼接 clientId/deviceName/productKey 后 HMAC-SHA1（大写 hex）"""
     parts = "".join(
@@ -99,7 +120,20 @@ class HotataPushClient:
         dn = aepauth_data.get("deviceName", "")
         ds = aepauth_data.get("deviceSecret", "")
         if not (pk and dn and ds):
-            _LOGGER.warning("aepauth 数据不完整，跳过长连接: %s", aepauth_data)
+            # Name only what is missing — never echo the payload: it carries
+            # deviceSecret, which is the password used to reach the broker.
+            missing = [
+                name
+                for name, value in (
+                    ("productKey", pk),
+                    ("deviceName", dn),
+                    ("deviceSecret", ds),
+                )
+                if not value
+            ]
+            _LOGGER.warning(
+                "aepauth 数据不完整（缺 %s），跳过长连接", "、".join(missing) or "全部字段"
+            )
             return False
 
         self._product_key = pk
@@ -114,11 +148,7 @@ class HotataPushClient:
         self.bound_token = ""
         self._hass_loop = hass_loop
 
-        client = mqtt.Client(
-            client_id=client_id,
-            protocol=mqtt.MQTTv311,
-            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-        )
+        client = _new_client(client_id)
         client.username_pw_set(self._base_id, password)
         client.tls_set(cert_reqs=ssl.CERT_NONE)  # 与 APP 一致，不校验证书
         client.reconnect_delay_set(RECONNECT_DELAY_MIN, RECONNECT_DELAY_MAX)

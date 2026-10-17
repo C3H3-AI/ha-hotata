@@ -157,9 +157,22 @@ primitives.ciphers = ciphers
 # ---- homeassistant core ----
 mod('homeassistant')
 config_entries = mod('homeassistant.config_entries')
+class OptionsFlow:
+    """Minimal options-flow base: enough for HotataOptionsFlow to subclass."""
+
+    config_entry = None
+
+    def async_show_form(self, *, step_id, data_schema=None, errors=None):
+        return {"type": "form", "step_id": step_id, "data_schema": data_schema}
+
+    def async_create_entry(self, *, title="", data=None):
+        return {"type": "create_entry", "title": title, "data": data or {}}
+
+
 class ConfigEntry:
     pass
 config_entries.ConfigEntry = ConfigEntry
+config_entries.OptionsFlow = OptionsFlow
 
 core = mod('homeassistant.core')
 class HomeAssistant:
@@ -183,7 +196,17 @@ class _ConfigEntries:
             entry.version = version
 ce.config_entries = _ConfigEntries()
 ce.ConfigEntry = ConfigEntry
-ce.ConfigFlow = type('ConfigFlow', (), {})
+class ConfigFlow:
+    """HA's flow base: subclasses declare their domain as a class kwarg."""
+
+    domain: str | None = None
+
+    def __init_subclass__(cls, domain=None, **kwargs):
+        super().__init_subclass__(**kwargs)
+        cls.domain = domain
+
+
+ce.ConfigFlow = ConfigFlow
 ce.ConfigFlowResult = dict
 
 helpers = mod('homeassistant.helpers')
@@ -436,6 +459,8 @@ class UnitOfDensity:
     MICROGRAMS_PER_CUBIC_METER = '\u00b5g/m\u00b3'
     MILLIGRAMS_PER_CUBIC_METER = 'mg/m\u00b3'
 cn.EntityCategory = EntityCategory
+cn.CONF_USERNAME = 'username'
+cn.CONF_PASSWORD = 'password'
 cn.PERCENTAGE = '%'
 cn.SIGNAL_STRENGTH_DECIBELS_MILLIWATT = 'dBm'
 cn.UnitOfTemperature = UnitOfTemperature
