@@ -13,6 +13,7 @@ connect to the broker, and `api.py` already lists `devicesecret` in its
 `_SENSITIVE_RESPONSE_KEYS`. A user pasting a debug log would publish it.
 """
 import asyncio
+import json
 import logging
 import sys
 import types
@@ -259,6 +260,7 @@ def test_token_rotation_rebuilds_the_connection():
 
     class FakeCoordinator:
         push_enabled = True
+        push_bound = True
         push_client = FakeClient()
         account = FakeAccount()
         _last_push_retry = 0.0
@@ -305,6 +307,7 @@ def test_matching_token_leaves_the_connection_alone():
 
     class FakeCoordinator:
         push_enabled = True
+        push_bound = True
         push_client = FakeClient()
         account = FakeAccount()
         _last_push_retry = 0.0
@@ -391,6 +394,177 @@ async def _await(coro):
     return await coro
 
 
+# ---------------- 队友技术文档列出的 D2/D3/D4 ----------------
+
+def _client(connected=True, bound=False):
+    class C:
+        def __init__(self):
+            self.connected = connected
+            self.bound = bound
+            self.bound_token = "tok"
+    return C()
+
+
+def test_connected_but_unbound_is_rebuilt():
+    """D2: a socket that is up but never bound must be retried.
+
+    The old condition only asked "connected?", so a bind that never succeeded
+    (code != 200, or no bind_reply at all) left the client connected forever and
+    the account bound to nothing — with no further retry.
+    """
+    import time
+
+    import hotata.coordinator as cm
+
+    calls = {"start": 0}
+
+    class C:
+        push_enabled = True
+        push_bound = False                                  # ← the trap
+        push_client = _client(connected=True, bound=False)
+        account = type("A", (), {"rate_limited": False,
+                                  "api": type("T", (), {"iot_token": "tok"})()})()
+        _last_push_retry = 0.0            # long past PUSH_RETRY_INTERVAL
+
+        async def async_setup_push(self):
+            calls["start"] += 1
+
+        def async_stop_push(self):
+            self.push_client = None
+
+    C._async_rebuild_push_if_stale = cm.HotataCoordinator._async_rebuild_push_if_stale
+    time.sleep(0)
+    asyncio.run(C()._async_rebuild_push_if_stale())
+    R.check("connected-but-unbound triggers a rebuild", calls["start"], 1)
+
+
+def test_connected_and_bound_is_left_alone():
+    import hotata.coordinator as cm
+
+    calls = {"start": 0}
+
+    class C:
+        push_enabled = True
+        push_bound = True
+        push_client = _client(connected=True, bound=True)
+        account = type("A", (), {"rate_limited": False,
+                                  "api": type("T", (), {"iot_token": "tok"})()})()
+        _last_push_retry = 0.0
+
+        async def async_setup_push(self):
+            calls["start"] += 1
+
+        def async_stop_push(self):
+            self.push_client = None
+
+    C._async_rebuild_push_if_stale = cm.HotataCoordinator._async_rebuild_push_if_stale
+    asyncio.run(C()._async_rebuild_push_if_stale())
+    R.check("a healthy bound client is not rebuilt", calls["start"], 0)
+
+
+def test_start_never_passes_keywords_to_run_in_executor():
+    """Regression: run_in_executor takes positional args only.
+
+    Passing cert_reqs= straight through raises
+    "got an unexpected keyword argument" and the push silently never starts.
+    """
+    import asyncio as _asyncio
+
+    calls = []
+
+    async def main():
+        source = Path(mqtt_push.__file__).read_text(encoding="utf-8")
+        R.check("tls_set is wrapped in partial",
+                "partial(client.tls_set" in source, True)
+        R.check("no keyword passed straight to run_in_executor",
+                "run_in_executor(\n                None, client.tls_set, cert_reqs" not in source,
+                True)
+
+    _asyncio.run(main())
+
+
+def test_properties_push_is_dispatched():
+    """D4: thing/properties must reach the callback, or entities freeze.
+
+    With the poll skipped while bound (coordinator) and no dispatch here, a
+    bound account saw neither polling nor pushes: "bound but never updates".
+    """
+    seen = []
+
+    p = mqtt_push.HotataPushClient(
+        get_iot_token=lambda: "t",
+        on_properties_pushed=lambda iot_id, items: seen.append((iot_id, items)),
+    )
+    p._product_key, p._device_name = "pk", "dn"
+
+    class Msg:
+        topic = "/sys/pk/dn/app/down/thing/properties"
+        payload = json.dumps({
+            "method": "thing.properties",
+            "params": {"iotId": "dev1",
+                       "items": {"PowerSwitch": {"time": 1, "value": "{\"PowerSwitch\":1}"}}},
+        }).encode()
+
+    p._call_in_loop = lambda fn: fn()          # run inline
+    p._on_message(None, None, Msg())
+    R.check("property push reached the callback", len(seen), 1)
+    R.check("with the normalised shape",
+            seen[0][1] if seen else None, {"PowerSwitch": {"time": 1, "value": 1}})
+
+
+def test_bind_2043_asks_for_a_token_refresh_once():
+    """2043 (check iotToken failed) is recoverable: refresh the token and rebind.
+
+    The token HTTP polling uses is renewed lazily on 401, so a stale iotToken
+    only ever shows up here — and only once, otherwise a token that is genuinely
+    unusable would hammer the cloud.
+    """
+    calls = {"refresh": 0}
+
+    p = mqtt_push.HotataPushClient(
+        get_iot_token=lambda: "stale-token",
+        on_properties_pushed=lambda *args: None,
+        on_bind_auth_failed=lambda: calls.__setitem__(
+            "refresh", calls["refresh"] + 1
+        ),
+    )
+    p._call_in_loop = lambda fn: fn()
+    p._product_key, p._device_name = "pk", "dn"
+
+    class Msg:
+        topic = "/sys/pk/dn/app/down/account/bind_reply"
+        payload = json.dumps(
+            {"code": 2043, "message": "check iotToken failed"}
+        ).encode()
+
+    p._on_message(None, None, Msg())
+    p._on_message(None, None, Msg())
+
+    R.check("2043 requests a token refresh", calls["refresh"], 1)
+    R.check("the client stays unbound", p.bound, False)
+
+
+def test_bind_reply_without_json_does_not_crash():
+    """A malformed bind_reply used to raise UnboundLocalError on `data`."""
+    p = mqtt_push.HotataPushClient(
+        get_iot_token=lambda: "t",
+        on_properties_pushed=lambda *args: None,
+    )
+    p._call_in_loop = lambda fn: fn()
+    p._product_key, p._device_name = "pk", "dn"
+
+    class Msg:
+        topic = "/sys/pk/dn/app/down/account/bind_reply"
+        payload = b"not-json"
+
+    error = None
+    try:
+        p._on_message(None, None, Msg())
+    except Exception as exc:  # noqa: BLE001
+        error = f"{type(exc).__name__}: {exc}"
+    R.check("malformed reply is tolerated", error, None)
+
+
 def main():
     test_incomplete_aepauth_never_logs_the_secret()
     test_incomplete_aepauth_never_logs_the_whole_payload()
@@ -401,6 +575,12 @@ def main():
     test_matching_token_leaves_the_connection_alone()
     test_options_flow_can_switch_push_off()
     test_options_flow_defaults_to_the_current_value()
+    test_connected_but_unbound_is_rebuilt()
+    test_connected_and_bound_is_left_alone()
+    test_start_never_passes_keywords_to_run_in_executor()
+    test_properties_push_is_dispatched()
+    test_bind_2043_asks_for_a_token_refresh_once()
+    test_bind_reply_without_json_does_not_crash()
     return R.report("Push client audit")
 
 
