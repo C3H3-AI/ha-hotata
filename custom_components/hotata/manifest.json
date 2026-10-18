@@ -11,5 +11,5 @@
   "iot_class": "cloud_push",
   "issue_tracker": "https://github.com/C3H3-AI/ha-hotata/issues",
   "requirements": ["paho-mqtt>=1.6.1"],
-  "version": "4.2.4"
+  "version": "4.2.5"
 }

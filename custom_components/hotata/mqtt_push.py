@@ -323,6 +323,9 @@ class HotataPushClient:
             parsed = _parse_properties_push(body)
             if parsed and self._on_properties_pushed is not None:
                 iot_id, items = parsed
+                _LOGGER.debug(
+                    "收到属性推送 iotId=%s keys=%s", iot_id, ",".join(items)
+                )
                 self._call_in_loop(
                     lambda: self._on_properties_pushed(iot_id, items)
                 )
@@ -348,12 +351,18 @@ class HotataPushClient:
         if not isinstance(params, dict):
             return
         iot_id = params.get("iotId") or data.get("iotId") or ""
-        # status: "online"/"offline"；也有 weird 的 "unknown"
-        status = str(params.get("status", "")).lower()
-        if not iot_id or status not in ("online", "offline"):
-            _LOGGER.debug("忽略上下线推送 iotId=%s status=%s", iot_id, status)
+        # 厂商下发的是 {time, value} 结构（value: 1=在线 / 0=离线），和
+        # /thing/status/get 轮询拿到的是同一形态 —— 之前这里只认
+        # params.status 里的 "online"/"offline" 字符串，于是每条推送都被丢弃，
+        # 上下线只能等轮询。两种形态都兼容。
+        raw = params.get("status")
+        if isinstance(raw, dict):
+            raw = raw.get("value")
+        status = str(raw if raw is not None else "").lower()
+        if not iot_id or status not in ("online", "offline", "1", "0", "true", "false"):
+            _LOGGER.debug("忽略上下线推送 iotId=%s status=%s", iot_id, raw)
             return
-        online = status == "online"
+        online = status in ("online", "1", "true")
         _LOGGER.debug("收到上下线推送 iotId=%s online=%s", iot_id, online)
         if self._on_status_pushed is not None:
             self._call_in_loop(lambda: self._on_status_pushed(iot_id, online))
