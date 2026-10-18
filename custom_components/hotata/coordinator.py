@@ -211,9 +211,6 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
         # would leave the account bound to nothing for good. Treat unbound as
         # "needs rebuild" so the bind is retried.
         due = time.time() - self._last_push_retry >= PUSH_RETRY_INTERVAL
-        # A socket that is up but never bound is just as broken as one that
-        # never came up: it looks healthy, so a "connected?" check alone would
-        # leave the account bound to nothing for good.
         needs_retry = due and (
             client is None or not client.connected or not self.push_bound
         )
@@ -314,6 +311,9 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
         device.properties = merged
         # 同步写回 coordinator.data（同一对象引用，实体通过 self.coordinator.data 读取）
         self.async_set_updated_data(data)
+        _LOGGER.debug(
+            "属性推送已合并 iot_id=%s keys=%s", iot_id, ",".join(items)
+        )
 
     def _handle_status_push(self, iot_id: str, online: bool) -> None:
         """收到设备上下线推送（事件循环线程回调）：实时更新在线状态"""

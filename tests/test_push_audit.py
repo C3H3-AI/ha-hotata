@@ -122,6 +122,14 @@ async def _start_with(aepauth):
     return records
 
 
+class _Msg:
+    """A stand-in for paho's MQTTMessage."""
+
+    def __init__(self, topic, payload):
+        self.topic = topic
+        self.payload = payload
+
+
 def test_incomplete_aepauth_never_logs_the_secret():
     """The MQTT triple must not be printed, even when it is unusable.
 
@@ -565,6 +573,143 @@ def test_bind_reply_without_json_does_not_crash():
     R.check("malformed reply is tolerated", error, None)
 
 
+# ---------------- 凭据自愈：identityId 与 iotToken 必须成对 ----------------
+
+def _api_stub():
+    """A HotataApi shell exposing only what the code under test touches."""
+    mod = __import__("hotata.api", fromlist=["HotataApi"])
+    api = mod.HotataApi.__new__(mod.HotataApi)
+    api.iot_token = ""
+    api.iot_refresh_token = ""
+    api.identity_id = ""
+    api.iot_token_expire = 0
+    api.login_calls = 0
+    return api
+
+
+def test_credential_without_identity_is_rejected():
+    """A refresh returning a token but no identityId must not be accepted.
+
+    Accepting it leaves identity_id empty, and the re-login entry
+    (async_refresh_iot_credential) requires identity_id — so the account locks
+    into "token cannot be refreshed and commands cannot be sent".
+    """
+    api = _api_stub()
+    R.check("token-only response rejected",
+            api._apply_credential({"iotToken": "tok", "refreshToken": "r"}),
+            False)
+    R.check("no partial identity stored", api.identity_id, "")
+
+    R.check("complete credential accepted",
+            api._apply_credential({"iotToken": "tok", "identityId": "id-1"}),
+            True)
+    R.check("identity stored", api.identity_id, "id-1")
+
+
+def test_refresh_falls_back_to_full_login():
+    """No identityId at all → the refresh path cannot run → log in fully."""
+    api = _api_stub()
+    api.iot_refresh_token = "r"
+
+    async def fake_login():
+        api.login_calls += 1
+
+    api.async_login = fake_login
+    asyncio.run(api.async_refresh_iot_credential())
+    R.check("full login used when identity is missing", api.login_calls, 1)
+
+
+def test_set_property_recovers_from_blank_identity():
+    """A rejected command re-logs in once and replays, instead of 500ing."""
+    mod = __import__("hotata.api", fromlist=["HotataApi"])
+    errors = __import__("hotata.exceptions", fromlist=["HotataError"])
+    api = _api_stub()
+    calls = {"n": 0, "login": 0}
+
+    async def fake_call(path, params, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise errors.HotataError("identityId is blank")
+        return {"ok": True}
+
+    async def fake_refresh():
+        calls["login"] += 1
+
+    api._async_gateway_call = fake_call
+    api.async_refresh_iot_credential = fake_refresh
+    asyncio.run(api.async_set_properties("dev1", {"LightSwitch": 1}))
+    R.check("command replayed once", calls["n"], 2)
+    R.check("credential refreshed before replay", calls["login"], 1)
+
+    # A different failure must still surface (no pointless re-login).
+    api2 = _api_stub()
+    api2.identity_id = "id"
+
+    async def boom(path, params, **kwargs):
+        raise errors.HotataError("device offline")
+
+    api2._async_gateway_call = boom
+    api2.async_refresh_iot_credential = fake_refresh
+
+    async def main2():
+        try:
+            await api2.async_set_properties("dev1", {"LightSwitch": 1})
+            return "no-error"
+        except errors.HotataError as err:
+            return str(err)
+
+    R.check("unrelated errors are not masked",
+            asyncio.run(main2()), "device offline")
+
+
+def test_status_push_accepts_both_shapes():
+    """厂商下发 {time, value}；旧代码只认 online/offline 字符串，全部被丢弃。
+
+    证据（2026-10-18 实测）：忽略上下线推送 iotId=dNl3ry… status={'time': …, 'value': 1}
+    """
+    seen = []
+    p = mqtt_push.HotataPushClient(
+        get_iot_token=lambda: "t",
+        on_properties_pushed=lambda *a: None,
+        on_status_pushed=lambda iot_id, online: seen.append((iot_id, online)),
+    )
+    p._call_in_loop = lambda fn: fn()
+
+    # 实测形态：value=1 → 在线
+    p._on_message(None, None, _Msg("/thing/status", json.dumps({
+        "params": {"iotId": "dev1", "status": {"time": 1792298267283, "value": 1}}
+    }).encode()))
+    R.check("dict shape with value=1 means online",
+            seen[-1] if seen else None, ("dev1", True))
+
+    p._on_message(None, None, _Msg("/thing/status", json.dumps({
+        "params": {"iotId": "dev1", "status": {"time": 1792298267283, "value": 0}}
+    }).encode()))
+    R.check("dict shape with value=0 means offline",
+            seen[-1] if seen else None, ("dev1", False))
+
+    # 字符串形态仍要兼容
+    p._on_message(None, None, _Msg("/thing/status", json.dumps({
+        "params": {"iotId": "dev2", "status": "online"}
+    }).encode()))
+    R.check("string shape still accepted",
+            seen[-1] if seen else None, ("dev2", True))
+
+
+def test_status_push_ignores_unknown():
+    seen = []
+    p = mqtt_push.HotataPushClient(
+        get_iot_token=lambda: "t",
+        on_properties_pushed=lambda *a: None,
+        on_status_pushed=lambda iot_id, online: seen.append((iot_id, online)),
+    )
+    p._call_in_loop = lambda fn: fn()
+    p._on_message(None, None, _Msg("/thing/status", json.dumps({
+        "params": {"iotId": "dev1", "status": {"value": "unknown"}}
+    }).encode()))
+    R.check("unknown status is dropped, not guessed", len(seen), 0)
+
+
 def main():
     test_incomplete_aepauth_never_logs_the_secret()
     test_incomplete_aepauth_never_logs_the_whole_payload()
@@ -579,6 +724,11 @@ def main():
     test_connected_and_bound_is_left_alone()
     test_start_never_passes_keywords_to_run_in_executor()
     test_properties_push_is_dispatched()
+    test_status_push_accepts_both_shapes()
+    test_status_push_ignores_unknown()
+    test_credential_without_identity_is_rejected()
+    test_refresh_falls_back_to_full_login()
+    test_set_property_recovers_from_blank_identity()
     test_bind_2043_asks_for_a_token_refresh_once()
     test_bind_reply_without_json_does_not_crash()
     return R.report("Push client audit")

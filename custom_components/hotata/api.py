@@ -191,17 +191,23 @@ class HotataApi:
         return self.iot_token_expire - int(time.time()) <= margin
 
     def _apply_credential(self, payload: Any) -> bool:
-        """把一次凭据响应写回实例字段，并记录 token 过期时间。"""
+        """把一次凭据响应写回实例字段，并记录 token 过期时间。
+
+        ``identityId`` 与 ``iotToken`` 是同一份凭据的两半：refresh-session
+        的响应可能只回 token 而不回 identity，此时若照单全收，identity_id 会
+        一直是空，而整链重登的入口（async_refresh_iot_credential）又要求它非
+        空 —— 于是锁死在"token 刷不出来、命令也发不出去"的状态。这里把两者
+        当作整体：缺少 identityId 就返回 False，让调用方走完整重登。
+        """
         token = _find_value(payload, "iotToken")
-        if not token:
+        identity = _find_value(payload, "identityId", "identity")
+        if not token or not identity:
             return False
         self.iot_token = str(token)
         refresh = _find_value(payload, "refreshToken")
         if refresh:
             self.iot_refresh_token = str(refresh)
-        identity = _find_value(payload, "identityId", "identity")
-        if identity:
-            self.identity_id = str(identity)
+        self.identity_id = str(identity)
         try:
             ttl = int(_find_value(payload, "iotTokenExpire"))
         except (TypeError, ValueError):
@@ -274,11 +280,15 @@ class HotataApi:
                 raise HotataAuthError("Account response has no authCode")
             session_id = await self._async_open_account_login(str(auth_code))
             credential = await self._async_create_iot_credential(session_id)
-            self.iot_token = str(credential["iotToken"])
-            self.iot_refresh_token = str(credential.get("refreshToken") or "")
-            self.identity_id = str(
-                credential.get("identityId") or credential.get("identity") or ""
-            )
+            if not self._apply_credential(credential):
+                # A credential without identityId cannot refresh itself and
+                # cannot send a command ("identityId is blank" from the cloud).
+                # Fail loudly here so the caller re-authenticates, instead of
+                # leaving a half-usable session that only reads.
+                raise HotataAuthError(
+                    "Login returned no identityId; the session cannot send "
+                    "commands (check the account type)"
+                )
         except HotataError:
             raise
         except (ClientError, TimeoutError, ValueError, TypeError) as err:
@@ -400,12 +410,13 @@ class HotataApi:
                     api_version="1.0.4",
                     include_token=False,
                 )
-                token = _find_value(payload, "iotToken")
-                if token:
-                    self._apply_credential(payload)
+                if self._apply_credential(payload):
                     return
             except HotataError:
                 pass
+        # 没有 refreshToken/identityId，或刷新回来的凭据不完整：
+        # 继续在残缺状态里打转只会让 bind 拿旧 token、下发命令报
+        # "identityId is blank"，所以整链重登一次。
         await self.async_login()
 
     @staticmethod
@@ -646,11 +657,27 @@ class HotataApi:
     async def async_set_properties(
         self, iot_id: str, items: dict[str, Any]
     ) -> None:
-        """Set multiple properties in one atomic Link IoT request."""
-        await self._async_gateway_call(
-            "/thing/properties/set",
-            {"iotId": iot_id, "items": items},
-        )
+        """Set multiple properties in one atomic Link IoT request.
+
+        A stale credential used to surface as a raw ``identityId is blank`` to
+        the caller, i.e. the UI showed a 500 for what is really a re-login
+        case. Recover once — re-login, then replay the same request — so a
+        token that lapsed while HA was running still works.
+        """
+        try:
+            await self._async_gateway_call(
+                "/thing/properties/set",
+                {"iotId": iot_id, "items": items},
+            )
+        except HotataError as err:
+            if "identityId is blank" not in str(err):
+                raise
+            _LOGGER.info("命令下发被拒（identityId 失效），重新登录后重试一次")
+            await self.async_refresh_iot_credential()
+            await self._async_gateway_call(
+                "/thing/properties/set",
+                {"iotId": iot_id, "items": items},
+            )
 
     async def async_invoke_service(
         self, iot_id: str, identifier: str, args: dict[str, Any] | None
