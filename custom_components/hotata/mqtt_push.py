@@ -119,7 +119,9 @@ class HotataPushClient:
         必须在事件循环中调用（内部用 asyncio 轮询等待 bind 结果）。
         """
         if self._started:
-            self.stop()
+            # 停旧连接会 publish unbind 并 join paho 线程，阻塞几百毫秒，
+            # 不能放在事件循环里（HA 会报 blocking call）。
+            await hass_loop.run_in_executor(None, self.stop)
         pk = aepauth_data.get("productKey", "")
         dn = aepauth_data.get("deviceName", "")
         ds = aepauth_data.get("deviceSecret", "")
@@ -197,7 +199,11 @@ class HotataPushClient:
         return self._bound
 
     def stop(self) -> None:
-        """断开并释放资源（可在任意线程调用）"""
+        """断开并释放资源。
+
+        会阻塞（publish unbind + paho 线程 join），**必须在 executor 里调用**，
+        不要在事件循环直接调。
+        """
         client = self._client
         self._client = None
         self._started = False
@@ -211,10 +217,16 @@ class HotataPushClient:
                     "request": {"clientId": self._base_id},
                     "params": None,
                 }, ensure_ascii=False, separators=(",", ":"))
-                client.publish(
+                info = client.publish(
                     f"/sys/{self._product_key}/{self._device_name}/app/up/account/unbind",
                     payload, qos=1)
-                time.sleep(0.5)  # 给后台线程一点时间发出 unbind
+                # 有界等待，替代 sleep(0.5)：让 unbind 真的发出去，又不无限阻塞
+                wait = getattr(info, "wait_for_publish", None)
+                if wait is not None:
+                    try:
+                        wait(timeout=2)
+                    except Exception:  # noqa: BLE001 - 尽力而为
+                        pass
         except Exception:  # noqa: BLE001 - 退出路径尽力而为
             pass
         try:
@@ -225,6 +237,10 @@ class HotataPushClient:
             client.loop_stop()
         except Exception:  # noqa: BLE001
             pass
+        thread = getattr(client, "_thread", None)
+        if thread is not None and thread.is_alive():
+            # 线程没退出就是泄漏，下一次重建会再叠一个
+            _LOGGER.warning("长连接线程未能退出，可能存在线程泄漏")
         self._bound = False
         self.bound_token = ""
 

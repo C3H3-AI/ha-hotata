@@ -97,6 +97,8 @@ DEFAULT_ENABLE_PUSH = True
 #: 绑定成功且不在活动窗口时的兜底轮询间隔（秒）：属性、事件、上下线三者都有
 #: 推送，这一轮只探在线，把请求量压到最低（账号曾因轮询过密吃 403）
 POLL_INTERVAL_PUSH_FALLBACK = 300
+#: 绑定成功后多久没收到属性推送就判定推送已死（云端每分钟一次全量）
+PROPERTY_PUSH_TIMEOUT = 420
 #: 推送未建立时的重试间隔（秒）
 PUSH_RETRY_INTERVAL = 300
 

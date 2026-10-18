@@ -41,6 +41,7 @@ from .const import (
     POLL_INTERVAL_OFFLINE,
     POLL_INTERVAL_PUSH_FALLBACK,
     POLL_INTERVAL_SLOW,
+    PROPERTY_PUSH_TIMEOUT,
     PUSH_RETRY_INTERVAL,
 )
 from .exceptions import HotataAuthError, HotataError, HotataRateLimited
@@ -147,6 +148,9 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
         )
         self.push_client: HotataPushClient | None = None
         self.push_bound: bool = False
+        #: 只由属性推送更新：状态/事件推送不能续命它，否则属性停了
+        #: 看门狗仍会认为推送健康。
+        self._last_property_push: float = 0.0
         self._push_starting = False
         self._last_push_retry = 0.0
 
@@ -185,6 +189,17 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
         finally:
             self._push_starting = False
 
+    def _property_push_stale(self) -> bool:
+        """True when the binding looks fine but properties stopped arriving.
+
+        The clock starts at bind success (see ``_handle_push_bound``), so a
+        connection that binds and then never delivers a single property is
+        still judged — otherwise that first-push blind spot would never heal.
+        """
+        if not self.push_bound or not self._last_property_push:
+            return False
+        return time.time() - self._last_property_push > PROPERTY_PUSH_TIMEOUT
+
     async def _async_rebuild_push_if_stale(self) -> None:
         """Rebuild the long connection when it is missing or its token is stale.
 
@@ -204,17 +219,38 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
         )
         if rotated:
             _LOGGER.info("iotToken 已轮换，重建长连接以重新绑定账号")
-            self.async_stop_push()
+            # stop() 会 join paho 线程，不能在事件循环里直接调
+            await self.hass.async_add_executor_job(self.async_stop_push)
             client = None
         # A socket that is up but never bound is just as broken as one that
         # never came up: it keeps looking healthy, so a "connected?" check alone
         # would leave the account bound to nothing for good. Treat unbound as
         # "needs rebuild" so the bind is retried.
+        #
+        # The same blind spot exists one step further along: bound, connected,
+        # token current — and the cloud stopped sending properties. Nothing
+        # above notices, because every individual signal looks healthy. Status
+        # and event pushes must NOT count as proof here; only the property
+        # timestamp does. Recovery reuses the same throttled path rather than
+        # calling async_setup_push directly, so a silent push cannot stack a
+        # second rebuild on top of the 300s one.
+        silent = self._property_push_stale()
         due = time.time() - self._last_push_retry >= PUSH_RETRY_INTERVAL
         needs_retry = due and (
             client is None or not client.connected or not self.push_bound
+            or silent
         )
         if needs_retry:
+            if silent and client is not None:
+                _LOGGER.warning(
+                    "长连接已绑定但 %s 秒没有属性推送，按不可用处理并重建"
+                    "（事件/上下线推送不算，属性才是实体数据的来源）",
+                    PROPERTY_PUSH_TIMEOUT,
+                )
+                # 静默的连接仍然 is_connected()，async_setup_push 会因为
+                # "已连接"直接返回，所以必须先停旧连接再重建。stop 同时把
+                # push_bound 置 False，即使重建失败，下一轮也会恢复属性轮询。
+                await self.hass.async_add_executor_job(self.async_stop_push)
             await self.async_setup_push()
 
     async def _async_setup_push_inner(self) -> None:
@@ -261,6 +297,10 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
 
     def _handle_push_bound(self, bound: bool) -> None:
         """bind/unbind 状态变化（事件循环线程回调）"""
+        if bound:
+            # 每次 bind 成功都重新计时：重连/重绑之后属性还没到，不能拿上一次
+            # 的时间戳判"静默"；而"绑定成功却一条属性都没收到"也要能判出来。
+            self._last_property_push = time.time()
         if bound == self.push_bound:
             return
         self.push_bound = bound
@@ -305,14 +345,31 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
             _LOGGER.debug("推送到来但设备未知，忽略: %s", iot_id)
             return
         device = data[iot_id]
-        merged = dict(device.properties or {})
+        # 厂商每分钟推一次全量快照。逐键比较后再决定是否通知，否则即使
+        # 什么都没变也会重写全部实体（两台设备约 45 个），每分钟刷一遍。
+        # 只比 value：快照里的 time 是上报时间戳，拿它一起比会让每次推送
+        # 都算"有变化"；顺带抹平轮询值（裸值）与推送值（{time,value}）的
+        # 形状差异。
+        previous = device.properties or {}
+        merged = dict(previous)
+        changed: list[str] = []
         for key, val in items.items():
+            if _property_value(previous.get(key)) != _property_value(val):
+                changed.append(key)
             merged[key] = val
+        self._last_property_push = time.time()
+        if not changed:
+            _LOGGER.debug(
+                "属性推送无变化 iot_id=%s keys=%d", iot_id, len(items)
+            )
+            return
         device.properties = merged
         # 同步写回 coordinator.data（同一对象引用，实体通过 self.coordinator.data 读取）
         self.async_set_updated_data(data)
         _LOGGER.debug(
-            "属性推送已合并 iot_id=%s keys=%s", iot_id, ",".join(items)
+            "属性推送已合并 iot_id=%s changed=%s",
+            iot_id,
+            ",".join(changed),
         )
 
     def _handle_status_push(self, iot_id: str, online: bool) -> None:
@@ -371,12 +428,22 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
             self.async_set_updated_data(data)
 
     def async_stop_push(self) -> None:
-        """停掉长连接（可在任意线程调用，unload 时经 executor 执行）"""
+        """停掉长连接。
+
+        内部会阻塞（join paho 线程），调用方必须放在 executor：
+        - unload 路径：``await hass.async_add_executor_job(...)``
+        - 重建路径：``await self.hass.async_add_executor_job(...)``
+        """
         client = self.push_client
-        self.push_client = None
-        self.push_bound = False
+        # 先真正停掉再清引用：反过来会让旧客户端失去引用但线程仍在跑，
+        # 每重建一次就漏一个 paho 线程。
         if client is not None:
             client.stop()
+        self.push_client = None
+        self.push_bound = False
+        # 清零而不是保留旧时间戳：下一条连接要重新从 bind 起算，
+        # 否则刚重建就会被判"静默"，白白再重建一次。
+        self._last_property_push = 0.0
 
     async def _async_discover_devices(self) -> list[HotataDevice]:
         """Discover direct bindings and recursively exposed gateway children."""
@@ -574,6 +641,18 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
             )
 
 
+def _property_value(value: Any) -> Any:
+    """Return the reported value, whether the cloud sent it raw or wrapped.
+
+    Polled properties can be bare values while pushes carry ``{time, value}``;
+    comparing or interpreting them without unwrapping would treat the same
+    state as two different ones.
+    """
+    if isinstance(value, dict) and "value" in value:
+        return value["value"]
+    return value
+
+
 def _is_motor_running(properties: dict[str, Any]) -> bool:
     """True while any rail motor is reported as opening/closing."""
     for identifier in (
@@ -581,6 +660,6 @@ def _is_motor_running(properties: dict[str, Any]) -> bool:
         "ApoleMotorControlMode",
         "BpoleMotorControlMode",
     ):
-        if properties.get(identifier) in (1, 2):
+        if _property_value(properties.get(identifier)) in (1, 2):
             return True
     return False

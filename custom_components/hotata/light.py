@@ -27,6 +27,7 @@ from .const import (
 )
 from .coordinator import HotataCoordinator
 from .entity import (
+    remove_stale_entity,
     HotataEntity,
     async_setup_dynamic_entities,
     entity_identity,
@@ -85,10 +86,16 @@ def _lights_for_device(
             ("BpoleLightSwitch", "B 杆照明", capabilities.CAP_DOUBLE_POLE),
             ("NightLightSwitch", "夜灯", capabilities.CAP_NIGHT_LIGHT),
         ):
-            if has_property(device, identifier) and capabilities.supported(
-                device, capability
-            ):
-                yield HotataOnOffLight(coordinator, device, identifier, name)
+            if not has_property(device, identifier):
+                continue
+            if not capabilities.supported(device, capability):
+                # The device states it lacks this lamp. An entry an earlier
+                # version created must not linger as an unavailable control —
+                # switch.py has been doing this since 4.0.x; light.py did not,
+                # so 夜灯 survived on machines whose bit string clears 22.
+                remove_stale_entity(coordinator.hass, device, "light", identifier)
+                continue
+            yield HotataOnOffLight(coordinator, device, identifier, name)
 
 
 class HotataOnOffLight(HotataEntity, LightEntity):

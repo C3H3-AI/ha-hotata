@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -32,8 +33,16 @@ _pkg.__path__ = [str(PKG / "hotata")]
 sys.modules.setdefault("hotata", _pkg)
 
 import hotata.mqtt_push as mqtt_push  # noqa: E402
+import hotata.coordinator as cm  # noqa: E402
 
 R = __import__("cover_harness").Results()
+
+
+class _InlineHass:
+    """Runs executor jobs inline so lifecycle branches stay unit-testable."""
+
+    async def async_add_executor_job(self, func, *args):
+        return func(*args)
 
 
 class _CallbackAPIVersion:
@@ -272,6 +281,8 @@ def test_token_rotation_rebuilds_the_connection():
         push_client = FakeClient()
         account = FakeAccount()
         _last_push_retry = 0.0
+        _last_property_push = time.time()  # 视为刚刚收到过，避免误判
+        hass = _InlineHass()
 
         async def async_setup_push(self):
             calls["start"] += 1
@@ -284,6 +295,9 @@ def test_token_rotation_rebuilds_the_connection():
     # one, not a copy that could drift.
     FakeCoordinator._async_rebuild_push_if_stale = (
         coordinator_mod.HotataCoordinator._async_rebuild_push_if_stale
+    )
+    FakeCoordinator._property_push_stale = (
+        coordinator_mod.HotataCoordinator._property_push_stale
     )
 
     import asyncio as _asyncio
@@ -319,6 +333,8 @@ def test_matching_token_leaves_the_connection_alone():
         push_client = FakeClient()
         account = FakeAccount()
         _last_push_retry = 0.0
+        _last_property_push = time.time()  # 视为刚刚收到过，避免误判
+        hass = _InlineHass()
 
         async def async_setup_push(self):
             calls["start"] += 1
@@ -329,6 +345,9 @@ def test_matching_token_leaves_the_connection_alone():
 
     FakeCoordinator._async_rebuild_push_if_stale = (
         coordinator_mod.HotataCoordinator._async_rebuild_push_if_stale
+    )
+    FakeCoordinator._property_push_stale = (
+        coordinator_mod.HotataCoordinator._property_push_stale
     )
     co = FakeCoordinator()
     _asyncio.run(co._async_rebuild_push_if_stale())
@@ -433,6 +452,7 @@ def test_connected_but_unbound_is_rebuilt():
         account = type("A", (), {"rate_limited": False,
                                   "api": type("T", (), {"iot_token": "tok"})()})()
         _last_push_retry = 0.0            # long past PUSH_RETRY_INTERVAL
+        hass = _InlineHass()
 
         async def async_setup_push(self):
             calls["start"] += 1
@@ -441,6 +461,7 @@ def test_connected_but_unbound_is_rebuilt():
             self.push_client = None
 
     C._async_rebuild_push_if_stale = cm.HotataCoordinator._async_rebuild_push_if_stale
+    C._property_push_stale = cm.HotataCoordinator._property_push_stale
     time.sleep(0)
     asyncio.run(C()._async_rebuild_push_if_stale())
     R.check("connected-but-unbound triggers a rebuild", calls["start"], 1)
@@ -458,6 +479,7 @@ def test_connected_and_bound_is_left_alone():
         account = type("A", (), {"rate_limited": False,
                                   "api": type("T", (), {"iot_token": "tok"})()})()
         _last_push_retry = 0.0
+        _last_property_push = time.time()  # 视为刚刚收到过，避免误判
 
         async def async_setup_push(self):
             calls["start"] += 1
@@ -466,6 +488,7 @@ def test_connected_and_bound_is_left_alone():
             self.push_client = None
 
     C._async_rebuild_push_if_stale = cm.HotataCoordinator._async_rebuild_push_if_stale
+    C._property_push_stale = cm.HotataCoordinator._property_push_stale
     asyncio.run(C()._async_rebuild_push_if_stale())
     R.check("a healthy bound client is not rebuilt", calls["start"], 0)
 
@@ -710,6 +733,260 @@ def test_status_push_ignores_unknown():
     R.check("unknown status is dropped, not guessed", len(seen), 0)
 
 
+def _dev(props, tsl_ids=("NightLightSwitch",), product_key="a1abYBCSVlV"):
+    """A real HotataDevice, built the way the other suites build one."""
+    mod = __import__("hotata.models", fromlist=["HotataDevice"])
+    return mod.HotataDevice(
+        iot_id="dev1",
+        name="airer",
+        product_key=product_key,
+        device_name="airer",
+        online=True,
+        raw={"productName": "X"},
+        properties=dict(props),
+        thing_model={"properties": [{"identifier": i} for i in tsl_ids]},
+    )
+
+
+def _co_with(data):
+    """Coordinator stand-in exposing what _handle_properties_push touches."""
+    co = cm.HotataCoordinator.__new__(cm.HotataCoordinator)
+    co.data = data
+    co.thing_models = {}
+    return co
+
+
+
+
+# ---------------- 看门狗：只认属性推送，不认任意消息 ----------------
+
+def test_watchdog_tracks_property_push_only():
+    """状态/事件推送也会到达，但不能续命看门狗。
+
+    Otherwise a socket that stays up while the cloud stops sending
+    properties looks healthy, and the poll stays skipped forever — the exact
+    blind spot this watchdog exists to close.
+    """
+    src = Path(cm.__file__).read_text(encoding="utf-8")
+    R.check("watchdog exists", "_last_property_push" in src, True)
+    handler = src.split("def _handle_properties_push")[1].split("\n    def ")[0]
+    R.check("property handler stamps the watchdog",
+            "_last_property_push" in handler, True)
+    status = src.split("def _handle_status_push")[1].split("\n    def ")[0]
+    R.check("status handler does NOT stamp it",
+            "_last_property_push" not in status, True)
+    events = src.split("def _handle_event_push")[1].split("\n    def ")[0]
+    R.check("event handler does NOT stamp it",
+            "_last_property_push" not in events, True)
+
+
+def test_watchdog_falls_back_to_polling_when_push_goes_silent():
+    """绑定成功但长时间没有属性推送 → 先停旧连接再真正重建。
+
+    必须用真实的 ``async_setup_push``：静默的连接仍然 ``is_connected()``，
+    只调用它会因"已连接"直接返回 —— 看门狗就退化成一条每次轮询都打印、
+    却永远修不好的日志（这正是本次复核发现的缺陷）。
+    """
+    import asyncio as _aio
+
+    calls = {"inner": 0, "stopped": 0}
+
+    class FakeClient:
+        connected = True
+        bound_token = "tok"
+
+        def is_connected(self):
+            return True
+
+        def stop(self):
+            calls["stopped"] += 1
+
+    class C:
+        push_enabled = True
+        push_bound = True
+        push_client = FakeClient()
+        account = type("A", (), {"rate_limited": False,
+                                  "api": type("T", (), {"iot_token": "tok"})()})()
+        _last_push_retry = 0.0
+        _last_property_push = time.time() - 1000  # 已经静默超过阈值
+        _push_starting = False
+        hass = _InlineHass()
+
+        async def _async_setup_push_inner(self):
+            calls["inner"] += 1
+
+    C._async_rebuild_push_if_stale = cm.HotataCoordinator._async_rebuild_push_if_stale
+    C._property_push_stale = cm.HotataCoordinator._property_push_stale
+    C.async_setup_push = cm.HotataCoordinator.async_setup_push
+    C.async_stop_push = cm.HotataCoordinator.async_stop_push
+
+    co = C()
+    _aio.run(co._async_rebuild_push_if_stale())
+    R.check("silent client is stopped first", calls["stopped"], 1)
+    R.check("silent push reaches the real rebuild path", calls["inner"], 1)
+    R.check("rebuild failure restores property polling", co.push_bound, False)
+    R.check("watchdog clock is cleared for the new connection",
+            co._last_property_push, 0.0)
+
+
+def test_watchdog_leaves_a_healthy_push_alone():
+    import asyncio as _aio
+
+    calls = {"inner": 0, "stopped": 0}
+
+    class FakeClient:
+        connected = True
+        bound_token = "tok"
+
+        def is_connected(self):
+            return True
+
+        def stop(self):
+            calls["stopped"] += 1
+
+    class C:
+        push_enabled = True
+        push_bound = True
+        push_client = FakeClient()
+        account = type("A", (), {"rate_limited": False,
+                                  "api": type("T", (), {"iot_token": "tok"})()})()
+        _last_push_retry = 0.0
+        _last_property_push = time.time()  # 刚刚收到过属性推送
+        _push_starting = False
+        hass = _InlineHass()
+
+        async def _async_setup_push_inner(self):
+            calls["inner"] += 1
+
+    C._async_rebuild_push_if_stale = cm.HotataCoordinator._async_rebuild_push_if_stale
+    C._property_push_stale = cm.HotataCoordinator._property_push_stale
+    C.async_setup_push = cm.HotataCoordinator.async_setup_push
+    C.async_stop_push = cm.HotataCoordinator.async_stop_push
+
+    _aio.run(C()._async_rebuild_push_if_stale())
+    R.check("a fresh property push is left alone", calls["inner"], 0)
+    R.check("a healthy client is not stopped", calls["stopped"], 0)
+
+
+def test_bind_success_restarts_the_watchdog_clock():
+    """绑定成功即计时：否则"绑上了但一条属性都没收到"永远判不出来。"""
+    co = cm.HotataCoordinator.__new__(cm.HotataCoordinator)
+    co.push_bound = True
+    co._last_property_push = 0.0
+    co._handle_push_bound(True)  # 提前 return，但计时先刷新
+    R.check("bind stamps the clock", co._last_property_push > 0, True)
+
+
+def test_unchanged_property_push_does_not_notify_entities():
+    """全量快照每分钟一次；值没变就不该刷 45 个实体。
+
+    Without the comparison the integration would rewrite every entity once a
+    minute even when nothing happened.
+    """
+    changed = []
+    data = {"dev1": _dev({"LightSwitch": {"value": 0}})}
+    co = _co_with(data)
+    co.async_set_updated_data = lambda d: changed.append(d)
+
+    # 完全相同的快照
+    co._handle_properties_push("dev1", {"LightSwitch": {"value": 0}})
+    R.check("identical snapshot does not notify", len(changed), 0)
+
+    # 真的变了
+    co._handle_properties_push("dev1", {"LightSwitch": {"value": 1}})
+    R.check("a real change notifies", len(changed), 1)
+    R.check("cache reflects the new value",
+            data["dev1"].properties["LightSwitch"], {"value": 1})
+
+
+def test_property_comparison_ignores_timestamp_and_wrapping():
+    """快照里的 time 是上报时间戳，参与比较会让每分钟都算"有变化"。"""
+    changed = []
+    data = {"dev1": _dev({"LightSwitch": {"time": 1, "value": 0}})}
+    co = _co_with(data)
+    co.async_set_updated_data = lambda d: changed.append(d)
+
+    co._handle_properties_push("dev1", {"LightSwitch": {"time": 2, "value": 0}})
+    R.check("time-only churn does not notify", len(changed), 0)
+
+    # 轮询拿裸值、推送拿 {time,value}，同一个状态不能被当成两次变化
+    changed2 = []
+    data2 = {"dev1": _dev({"LightSwitch": 0})}
+    co2 = _co_with(data2)
+    co2.async_set_updated_data = lambda d: changed2.append(d)
+    co2._handle_properties_push("dev1", {"LightSwitch": {"time": 3, "value": 0}})
+    R.check("raw and wrapped forms compare equal", len(changed2), 0)
+
+
+def test_motor_detection_accepts_wrapped_values():
+    """推送把 MotorControlMode 写成 {time,value} 后，快/慢轮询仍要能判断。"""
+    R.check("wrapped running motor is detected",
+            cm._is_motor_running({"MotorControlMode": {"time": 1, "value": 1}}),
+            True)
+    R.check("wrapped idle motor is not running",
+            cm._is_motor_running({"MotorControlMode": {"time": 1, "value": 0}}),
+            False)
+
+
+def test_capped_lamp_is_not_created_and_stale_one_is_removed():
+    """位 22 = 0 的机器：夜灯灯实体不产出，且旧版留下的要被清掉。
+
+    switch.py 早就为无能力的开关做自愈，light.py 一直没做，于是
+    light.liang_yi_jia_ye_deng 在生产上留到了 4.2.5。这里断言的是**行为**
+    （工厂产出 + 调用了清理），而不是源码里有没有某个字符串。
+    """
+    import hotata.light as light_mod
+
+    removed = []
+
+    class FakeHass:
+        states = type("S", (), {})()
+
+    class FakeCo:
+        hass = FakeHass()
+        data = {"dev1": None}
+
+    # 全部位为 0 的机型（真实 D-3072S 位串）
+    dev = _dev({"ModelFunctionList": "00000000000000000011111100110000"})
+    co = FakeCo()
+    co.data = {"dev1": dev}
+
+    light_mod.remove_stale_entity = lambda hass, device, domain, key: removed.append(
+        (domain, key)
+    )
+
+    ents = list(light_mod._lights_for_device(co, dev))
+    names = [
+        getattr(getattr(e, "entity_description", None), "key", None)
+        or getattr(e, "identifier", None)
+        or getattr(e, "_attr_name", None)
+        for e in ents
+    ]
+    R.check("no night lamp produced", "NightLightSwitch" in names, False)
+    R.check("the stale night lamp is removed", removed,
+            [("light", "NightLightSwitch")])
+
+    # 位 22 置位 → 应当产出，且不清理
+    # 位 n（1-based，从右往左）落在 index width-n；22 → index 10
+    _on = ["0"] * 32
+    _on[32 - 22] = "1"
+    dev2 = _dev({"ModelFunctionList": "".join(_on)})
+    co2 = FakeCo()
+    co2.data = {"dev2": dev2}
+    removed.clear()
+    ents2 = list(light_mod._lights_for_device(co2, dev2))
+    names2 = [
+        getattr(getattr(e, "entity_description", None), "key", None)
+        or getattr(e, "identifier", None)
+        or getattr(e, "_attr_name", None)
+        for e in ents2
+    ]
+    R.check("night lamp produced when the bit is set",
+            "NightLightSwitch" in names2, True)
+    R.check("nothing removed when supported", removed, [])
+
+
+
 def main():
     test_incomplete_aepauth_never_logs_the_secret()
     test_incomplete_aepauth_never_logs_the_whole_payload()
@@ -726,6 +1003,14 @@ def main():
     test_properties_push_is_dispatched()
     test_status_push_accepts_both_shapes()
     test_status_push_ignores_unknown()
+    test_watchdog_tracks_property_push_only()
+    test_watchdog_falls_back_to_polling_when_push_goes_silent()
+    test_watchdog_leaves_a_healthy_push_alone()
+    test_bind_success_restarts_the_watchdog_clock()
+    test_unchanged_property_push_does_not_notify_entities()
+    test_capped_lamp_is_not_created_and_stale_one_is_removed()
+    test_property_comparison_ignores_timestamp_and_wrapping()
+    test_motor_detection_accepts_wrapped_values()
     test_credential_without_identity_is_rejected()
     test_refresh_falls_back_to_full_login()
     test_set_property_recovers_from_blank_identity()
