@@ -206,14 +206,24 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
             _LOGGER.info("iotToken 已轮换，重建长连接以重新绑定账号")
             self.async_stop_push()
             client = None
-        if (client is None or not client.connected) and (
-            time.time() - self._last_push_retry >= PUSH_RETRY_INTERVAL
-        ):
+        # A socket that is up but never bound is just as broken as one that
+        # never came up: it keeps looking healthy, so a "connected?" check alone
+        # would leave the account bound to nothing for good. Treat unbound as
+        # "needs rebuild" so the bind is retried.
+        due = time.time() - self._last_push_retry >= PUSH_RETRY_INTERVAL
+        # A socket that is up but never bound is just as broken as one that
+        # never came up: it looks healthy, so a "connected?" check alone would
+        # leave the account bound to nothing for good.
+        needs_retry = due and (
+            client is None or not client.connected or not self.push_bound
+        )
+        if needs_retry:
             await self.async_setup_push()
 
     async def _async_setup_push_inner(self) -> None:
-        # 确保有可用 iotToken（bind 需要）
-        if not self.account.api.iot_token:
+        # 确保 bind 用的 iotToken 是新鲜的。HTTP 轮询会在 401 时自动续期，
+        # 但 bind 直接把 token 发出去，过期只会得到 2043 check iotToken failed。
+        if self.account.api.iot_token_needs_refresh():
             try:
                 await self.account.api.async_refresh_iot_credential()
             except Exception as e:  # noqa: BLE001
@@ -237,6 +247,7 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
             on_bound=self._handle_push_bound,
             on_status_pushed=self._handle_status_push,
             on_event_pushed=self._handle_event_push,
+            on_bind_auth_failed=self._handle_bind_auth_failed,
         )
         try:
             bound = await client.async_start(self.hass.loop, aepauth)
@@ -258,6 +269,22 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
         self.push_bound = bound
         _LOGGER.info("长连接绑定状态 -> %s", "已绑定" if bound else "未绑定")
         self._apply_push_interval()
+
+    def _handle_bind_auth_failed(self) -> None:
+        """bind 返回 2043（iotToken 失效）：刷新 token 后重发一次 bind。"""
+        self.hass.async_create_task(self._async_rebind_with_fresh_token())
+
+    async def _async_rebind_with_fresh_token(self) -> None:
+        client = self.push_client
+        if client is None:
+            return
+        try:
+            await self.account.api.async_refresh_iot_credential()
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.warning("绑定失败后刷新 iotToken 仍失败: %s", e)
+            return
+        client.request_bind()
+        _LOGGER.info("已用新 iotToken 重新发起账号绑定")
 
     def _apply_push_interval(self) -> None:
         """按推送状态与活动窗口选择轮询节奏"""

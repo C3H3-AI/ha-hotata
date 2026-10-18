@@ -172,6 +172,42 @@ class HotataApi:
         self.iot_refresh_token = iot_refresh_token
         self.identity_id = identity_id
         self.registered_id = registered_id or str(uuid.uuid4())
+        #: iotToken 的绝对过期时间（epoch 秒）。0 表示未知——从配置项恢复的
+        #: 历史 token 都属于这一类，必须当作"需要刷新"处理。
+        self.iot_token_expire: int = 0
+
+    def iot_token_needs_refresh(self, margin: int = 300) -> bool:
+        """bind 之前是否必须换一个 iotToken。
+
+        HTTP 调用靠 ``retry_auth`` 在失败时自动续期，所以过期 token 不会
+        影响轮询；但 bind 是直接把这个 token 发出去，过期只会得到
+        ``code 2043 check iotToken failed``。过期时间未知时同样返回 True：
+        历史配置项里的 token 很可能早已失效。
+        """
+        if not self.iot_token:
+            return True
+        if self.iot_token_expire <= 0:
+            return True
+        return self.iot_token_expire - int(time.time()) <= margin
+
+    def _apply_credential(self, payload: Any) -> bool:
+        """把一次凭据响应写回实例字段，并记录 token 过期时间。"""
+        token = _find_value(payload, "iotToken")
+        if not token:
+            return False
+        self.iot_token = str(token)
+        refresh = _find_value(payload, "refreshToken")
+        if refresh:
+            self.iot_refresh_token = str(refresh)
+        identity = _find_value(payload, "identityId", "identity")
+        if identity:
+            self.identity_id = str(identity)
+        try:
+            ttl = int(_find_value(payload, "iotTokenExpire"))
+        except (TypeError, ValueError):
+            ttl = 0
+        self.iot_token_expire = int(time.time()) + ttl if ttl > 0 else 0
+        return True
 
     @staticmethod
     def _encrypt_password(password: str) -> str:
@@ -342,6 +378,7 @@ class HotataApi:
         token = _find_value(payload, "iotToken")
         if not token:
             raise HotataAuthError("IoT credential creation failed")
+        self._apply_credential(payload)
         return {
             "iotToken": token,
             "refreshToken": _find_value(payload, "refreshToken"),
@@ -365,11 +402,7 @@ class HotataApi:
                 )
                 token = _find_value(payload, "iotToken")
                 if token:
-                    self.iot_token = str(token)
-                    self.iot_refresh_token = str(
-                        _find_value(payload, "refreshToken")
-                        or self.iot_refresh_token
-                    )
+                    self._apply_credential(payload)
                     return
             except HotataError:
                 pass

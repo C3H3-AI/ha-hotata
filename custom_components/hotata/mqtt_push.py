@@ -27,6 +27,7 @@ import logging
 import ssl
 import threading
 import time
+from functools import partial
 import uuid
 from collections.abc import Callable
 
@@ -83,12 +84,14 @@ class HotataPushClient:
         on_bound: Callable[[bool], None] | None = None,
         on_status_pushed: Callable[[str, bool], None] | None = None,
         on_event_pushed: Callable[[str, dict], None] | None = None,
+        on_bind_auth_failed: Callable[[], None] | None = None,
     ) -> None:
         self._get_iot_token = get_iot_token
         self._on_properties_pushed = on_properties_pushed
         self._on_bound = on_bound
         self._on_status_pushed = on_status_pushed
         self._on_event_pushed = on_event_pushed
+        self._on_bind_auth_failed = on_bind_auth_failed
 
         self._client: mqtt.Client | None = None
         self._product_key = ""
@@ -96,6 +99,7 @@ class HotataPushClient:
         self._base_id = ""
         self._bind_event = threading.Event()
         self._bound = False
+        self._bind_retried = False
         self._started = False
         self._hass_loop: asyncio.AbstractEventLoop | None = None
         #: bind 时使用的 iotToken，供 coordinator 判断 token 轮换后是否需要重连
@@ -145,12 +149,12 @@ class HotataPushClient:
 
         self._bind_event = threading.Event()
         self._bound = False
+        self._bind_retried = False
         self.bound_token = ""
         self._hass_loop = hass_loop
 
         client = _new_client(client_id)
         client.username_pw_set(self._base_id, password)
-        client.tls_set(cert_reqs=ssl.CERT_NONE)  # 与 APP 一致，不校验证书
         client.reconnect_delay_set(RECONNECT_DELAY_MIN, RECONNECT_DELAY_MAX)
         client.on_connect = self._on_connect
         client.on_disconnect = self._on_disconnect
@@ -158,8 +162,15 @@ class HotataPushClient:
         self._client = client
 
         try:
-            # connect 会做 DNS/TCP/CONNACK，可能阻塞，放线程池执行
-            await asyncio.get_running_loop().run_in_executor(
+            # tls_set 会同步加载 CA 证书（context.load_default_certs），HA 会在
+            # 事件循环里报 blocking call；connect 也会做 DNS/TCP/CONNACK。两者
+            # 都放线程池。
+            loop = asyncio.get_running_loop()
+            # run_in_executor 只接受位置参数，keyword 要先包成 partial。
+            # 与 APP 一致，不校验证书
+            await loop.run_in_executor(
+                None, partial(client.tls_set, cert_reqs=ssl.CERT_NONE))
+            await loop.run_in_executor(
                 None, client.connect, host, MQTT_PORT, MQTT_KEEPALIVE)
         except Exception as e:
             _LOGGER.error("长连接 MQTT 连接失败: %s", e)
@@ -226,7 +237,11 @@ class HotataPushClient:
             return
         _LOGGER.debug("长连接 MQTT 已连接，订阅下行 topic")
         client.subscribe(f"/sys/{self._product_key}/{self._device_name}/app/down/#", qos=1)
-        # 发起账号绑定（携带当前 iotToken）
+        self._bind_retried = False
+        self._publish_bind(client)
+
+    def _publish_bind(self, client) -> None:
+        """向云端发布账号绑定，携带当前 iotToken。"""
         iot_token = ""
         try:
             iot_token = self._get_iot_token()
@@ -242,6 +257,14 @@ class HotataPushClient:
         client.publish(
             f"/sys/{self._product_key}/{self._device_name}/app/up/account/bind",
             payload, qos=1)
+
+    def request_bind(self) -> None:
+        """用最新 iotToken 重新发布一次 bind（token 刷新后由 coordinator 调用）。"""
+        client = self._client
+        if client is None or not client.is_connected():
+            return
+        self._bind_event.clear()
+        self._publish_bind(client)
 
     def _on_disconnect(self, client, userdata, flags, reason_code, properties=None):
         rc = getattr(reason_code, "value", reason_code)
@@ -260,22 +283,49 @@ class HotataPushClient:
             return
 
         if "/account/bind_reply" in topic:
+            data: dict = {}
             try:
-                data = json.loads(body)
-                code = data.get("code")
+                parsed = json.loads(body)
+                if isinstance(parsed, dict):
+                    data = parsed
             except json.JSONDecodeError:
-                code = None
+                pass
+            code = data.get("code")
             self._bound = code == 200
             if self._bound:
                 _LOGGER.info("长连接账号绑定成功 (bind_reply code=200)")
             else:
-                _LOGGER.warning("长连接账号绑定失败: %s", body[:200])
+                _LOGGER.warning(
+                    "长连接账号绑定失败 code=%s message=%s",
+                    code,
+                    data.get("message") or data.get("msg") or body[:200],
+                )
+                if code == 2043 and not self._bind_retried:
+                    # iotToken 失效：交给 coordinator 刷新 token 后重发一次。
+                    # 只重试一次，避免 token 真的不可用时把云端刷爆。
+                    self._bind_retried = True
+                    _LOGGER.warning(
+                        "bind 返回 2043（iotToken 失效），刷新 token 后重试一次"
+                    )
+                    if self._on_bind_auth_failed is not None:
+                        self._call_in_loop(self._on_bind_auth_failed)
             self._bind_event.set()
             if self._on_bound:
                 self._call_in_loop(lambda: self._on_bound(self._bound))
             return
 
         if "/account/unbind_reply" in topic:
+            return
+
+        if "/thing/properties" in topic:
+            # 属性变化：这条分支以前根本不存在，_parse_properties_push 写好却
+            # 没有调用点，于是"绑定成功"等于"属性不再轮询也不走推送" → 实体冻结。
+            parsed = _parse_properties_push(body)
+            if parsed and self._on_properties_pushed is not None:
+                iot_id, items = parsed
+                self._call_in_loop(
+                    lambda: self._on_properties_pushed(iot_id, items)
+                )
             return
 
         if "/thing/status" in topic:
