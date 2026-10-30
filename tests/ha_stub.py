@@ -235,7 +235,7 @@ class _DRRegistry:
     def async_remove_device(self, device_id):
         pass
 
-    def async_entries_for_config(self, registry, entry_id):
+    def async_entries_for_config_entry(self, registry, entry_id):
         return []
 
 
@@ -559,7 +559,7 @@ class _EntityRegistry:
     def async_get(self, hass):
         return self
 
-    def async_entries_for_config(self, registry, entry_id):
+    def async_entries_for_config_entry(self, registry, entry_id):
         return []
 
 registry = _EntityRegistry()
@@ -567,5 +567,5 @@ def _async_get(hass):
     return getattr(hass, "entity_registry", registry)
 er.async_get = _async_get
 er.EntityRegistry = _EntityRegistry
-er.async_entries_for_config = lambda registry, entry_id: []
+er.async_entries_for_config_entry = lambda registry, entry_id: []
 helpers.entity_registry = er

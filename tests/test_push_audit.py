@@ -1048,7 +1048,7 @@ class _FakeRegistries:
     def er_async_get(self, hass):
         return self
 
-    def async_entries_for_config(self, registry, entry_id):
+    def async_entries_for_config_entry(self, registry, entry_id):
         return [
             types.SimpleNamespace(device_id=iot_id) for iot_id in self._specs
         ]
@@ -1062,7 +1062,7 @@ def _prune_co(specs):
         iot_id: _mkdev(iot_id, name)
         for iot_id, (name, _) in specs.items()
     }
-    co._missing_counts = {}
+    co._missing_since = {}
     co.hass = types.SimpleNamespace()
     co.config_entry = types.SimpleNamespace(entry_id="entry-1")
 
@@ -1073,63 +1073,60 @@ def _prune_co(specs):
     )
     cm.er = types.SimpleNamespace(
         async_get=fake.er_async_get,
-        async_entries_for_config=fake.async_entries_for_config,
+        async_entries_for_config_entry=fake.async_entries_for_config_entry,
     )
     return co, fake
 
 
-def test_removed_device_is_pruned_after_consecutive_misses():
-    """云端连续缺失达到阈值才清理；一次缺失不能删。"""
+def test_removed_device_is_pruned_only_after_the_window():
+    """设备必须持续缺失满 30 分钟才清理；一次缺失不能删。"""
     co, fake = _prune_co(
         {"keep": ("晾衣机", False), "gone": ("旧晾衣架", False)}
     )
-    removed = fake.removed
+    R.check("no prune on the first miss", (co._async_prune_removed_devices({"keep"}), fake.removed)[1], [])
+    R.check("still in data", "gone" in co.data, True)
+    R.check("miss recorded", "gone" in co._missing_since, True)
 
-    # 第 1 次：gone 消失，但未到阈值 → 不删
+    # 把首次缺失时间往前推，模拟已经等了 30 分钟
+    co._missing_since["gone"] -= (
+        cm.HotataCoordinator._PRUNE_AFTER_SECONDS + 1
+    )
     co._async_prune_removed_devices({"keep"})
-    R.check("one miss does not prune", removed, [])
-    R.check("one miss keeps the device in data", "gone" in co.data, True)
-
-    # 连续缺失到阈值前一次：仍不删
-    for _ in range(cm.HotataCoordinator._MISS_BEFORE_PRUNE - 2):
-        co._async_prune_removed_devices({"keep"})
-    R.check("still not pruned just below the threshold", removed, [])
-
-    # 达到阈值：删设备 + 从 data 移除
-    co._async_prune_removed_devices({"keep"})
-    R.check("pruned at the threshold", removed, ["gone"])
+    R.check("pruned after the window", fake.removed, ["gone"])
     R.check("gone removed from coordinator data", "gone" in co.data, False)
     R.check("gone removed from the registry", "gone" not in fake._specs, True)
+    R.check("miss record cleared", "gone" in co._missing_since, False)
 
-    # 之后不再重复删
     co._async_prune_removed_devices({"keep"})
-    R.check("no repeat prune", removed, ["gone"])
+    R.check("no repeat prune", fake.removed, ["gone"])
 
 
-def test_reappearing_device_resets_the_counter():
-    """中间回来过一次 → 计数清零，重新计。"""
+def test_reappearing_device_resets_the_window():
+    """设备回来后缺失计时清零，重新计满 30 分钟才会再判。"""
     co, fake = _prune_co({"gone": ("旧晾衣架", False)})
-    removed = fake.removed
-    limit = cm.HotataCoordinator._MISS_BEFORE_PRUNE
-
-    for _ in range(limit - 1):
-        co._async_prune_removed_devices(set())
-    co._async_prune_removed_devices({"gone"})      # 回来了
-    R.check("counter cleared on return", co._missing_counts.get("gone"), None)
-
-    for _ in range(limit - 1):
-        co._async_prune_removed_devices(set())
-    R.check("not pruned before threshold again", removed, [])
     co._async_prune_removed_devices(set())
-    R.check("pruned only after full misses again", removed, ["gone"])
+    R.check("miss recorded", "gone" in co._missing_since, True)
+
+    co._async_prune_removed_devices({"gone"})       # 回来了
+    R.check("window cleared on return", "gone" in co._missing_since, False)
+
+    co._async_prune_removed_devices(set())          # 又消失
+    R.check("not pruned before the window", fake.removed, [])
+    co._missing_since["gone"] -= (
+        cm.HotataCoordinator._PRUNE_AFTER_SECONDS + 1
+    )
+    co._async_prune_removed_devices(set())
+    R.check("pruned only after a full window", fake.removed, ["gone"])
 
 
 def test_shared_device_is_never_pruned():
     """被其他配置项共用的设备不删。"""
     co, fake = _prune_co({"shared": ("共用晾衣架", True)})
-    limit = cm.HotataCoordinator._MISS_BEFORE_PRUNE
-    for _ in range(limit + 1):
-        co._async_prune_removed_devices(set())
+    co._async_prune_removed_devices(set())
+    co._missing_since["shared"] -= (
+        cm.HotataCoordinator._PRUNE_AFTER_SECONDS + 1
+    )
+    co._async_prune_removed_devices(set())
     R.check("shared device survives", fake.removed, [])
     R.check("shared device kept in data", "shared" in co.data, True)
     R.check("shared device kept in the registry", "shared" in fake._specs, True)
@@ -1157,8 +1154,8 @@ def main():
     test_bind_success_restarts_the_watchdog_clock()
     test_unchanged_property_push_does_not_notify_entities()
     test_capped_lamp_is_not_created_and_stale_one_is_removed()
-    test_removed_device_is_pruned_after_consecutive_misses()
-    test_reappearing_device_resets_the_counter()
+    test_removed_device_is_pruned_only_after_the_window()
+    test_reappearing_device_resets_the_window()
     test_shared_device_is_never_pruned()
     test_property_comparison_ignores_timestamp_and_wrapping()
     test_motor_detection_accepts_wrapped_values()

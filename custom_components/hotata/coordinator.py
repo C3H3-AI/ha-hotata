@@ -153,8 +153,8 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
         #: 只由属性推送更新：状态/事件推送不能续命它，否则属性停了
         #: 看门狗仍会认为推送健康。
         self._last_property_push: float = 0.0
-        #: iot_id -> 连续未在云端设备列表中出现的轮询次数
-        self._missing_counts: dict[str, int] = {}
+        #: iot_id -> 首次发现不在云端列表里的时间戳
+        self._missing_since: dict[str, float] = {}
         self._push_starting = False
         self._last_push_retry = 0.0
 
@@ -485,9 +485,9 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
                     queue.append(child)
         return list(by_id.values())
 
-    #: 云端连续这么多次都没返回的设备才判为已移除（约 30 分钟），
-    #: 防止一次列表抖动就误删用户的实体与设备。
-    _MISS_BEFORE_PRUNE = 15
+    #: 设备持续这么久（秒）不在云端列表里才判为已移除。用时间而不是轮询次数：
+    #: 绑定后轮询是 300 秒一次，按次数算会拖到一个多小时。
+    _PRUNE_AFTER_SECONDS = 1800
 
     def _async_prune_removed_devices(self, cloud_ids: set[str]) -> None:
         """Drop registry entries for devices the cloud no longer returns.
@@ -496,16 +496,21 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
         here: a device vanishing from the cloud list also vanishes from
         ``self.data`` on the very next poll, so by the time this runs the
         stale device is only visible in the registry. A device must be
-        absent from ``cloud_ids`` for ``_MISS_BEFORE_PRUNE`` consecutive
+        absent from ``cloud_ids`` for ``_PRUNE_AFTER_SECONDS``
         polls before it is judged removed, and devices shared with another
         config entry are left untouched.
         """
+        entry = getattr(self, "config_entry", None)
+        if entry is None:
+            # Every real coordinator is built with its config entry; a bare
+            # stand-in (tests) has none, and pruning is not its concern.
+            return
         registry = dr.async_get(self.hass)
-        entry_id = self.config_entry.entry_id
+        entry_id = entry.entry_id
         ent_registry = er.async_get(self.hass)
         device_ids = {
             e.device_id
-            for e in er.async_entries_for_config(ent_registry, entry_id)
+            for e in er.async_entries_for_config_entry(ent_registry, entry_id)
             if e.device_id
         }
         for device_id in sorted(device_ids):
@@ -519,20 +524,21 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
                 None,
             )
             if iot_id is None or iot_id in cloud_ids:
-                self._missing_counts.pop(iot_id, None) if iot_id else None
+                if iot_id:
+                    self._missing_since.pop(iot_id, None)
                 continue
-            misses = self._missing_counts.get(iot_id, 0) + 1
-            self._missing_counts[iot_id] = misses
-            if misses < self._MISS_BEFORE_PRUNE:
+            since = self._missing_since.setdefault(iot_id, time.time())
+            missing_for = time.time() - since
+            if missing_for < self._PRUNE_AFTER_SECONDS:
                 _LOGGER.debug(
-                    "设备 %s 未出现在云端列表（第 %d/%d 次）",
+                    "设备 %s 未出现在云端列表（已 %.0f/%d 秒）",
                     device_entry.name or iot_id,
-                    misses,
-                    self._MISS_BEFORE_PRUNE,
+                    missing_for,
+                    self._PRUNE_AFTER_SECONDS,
                 )
                 continue
             if device_entry.config_entries - {entry_id}:
-                self._missing_counts.pop(iot_id, None)
+                self._missing_since.pop(iot_id, None)
                 _LOGGER.info(
                     "设备 %s 已从云端消失，但被其他配置项共用，保留",
                     device_entry.name or iot_id,
@@ -544,7 +550,7 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
                 iot_id,
             )
             registry.async_remove_device(device_entry.id)
-            self._missing_counts.pop(iot_id, None)
+            self._missing_since.pop(iot_id, None)
             self.data.pop(iot_id, None)
 
     async def _async_update_data(self) -> dict[str, HotataDevice]:

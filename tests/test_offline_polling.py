@@ -148,8 +148,8 @@ def make_coordinator(devices, online_map=None, fail_online=None, warm=False):
     co.hass = types.SimpleNamespace()
     co.entry = types.SimpleNamespace(data={})
     co.config_entry = types.SimpleNamespace(entry_id="test-entry")
-    co._missing_counts = {}
-    co._MISS_BEFORE_PRUNE = HotataCoordinator._MISS_BEFORE_PRUNE
+    co._missing_since = {}
+    co._PRUNE_AFTER_SECONDS = HotataCoordinator._PRUNE_AFTER_SECONDS
     co._property_push_stale = MethodType(
         HotataCoordinator._property_push_stale, co
     )
