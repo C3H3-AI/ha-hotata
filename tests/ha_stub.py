@@ -223,16 +223,26 @@ class DeviceInfo(dict):
     pass
 dr.DeviceInfo = DeviceInfo
 
-_REG = {}
-def _dr_async_get(hass):
-    return _DR_REGISTRY
+dr.DeviceInfo = DeviceInfo
+
+
 class _DRRegistry:
+    """Registry stub covering what hotata's coordinator calls."""
+
     def async_get_device(self, identifiers=None):
         return None
+
     def async_remove_device(self, device_id):
         pass
+
+    def async_entries_for_config(self, registry, entry_id):
+        return []
+
+
 _DR_REGISTRY = _DRRegistry()
-dr.async_get = _dr_async_get
+dr.async_get = lambda hass: _DR_REGISTRY
+dr.async_entries_for_config = lambda registry, entry_id: []
+dr.async_remove_device = lambda device_id: None
 helpers.device_registry = dr
 
 event = mod('homeassistant.helpers.event')

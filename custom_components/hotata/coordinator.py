@@ -491,54 +491,53 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
     def _async_prune_removed_devices(self, cloud_ids: set[str]) -> None:
         """Drop registry entries for devices the cloud no longer returns.
 
-        Entities die with the device, but the device entry itself (and any
-        area/name the user gave it) would linger forever without this. A
-        device must be missing from the cloud list ``_MISS_BEFORE_PRUNE``
-        consecutive polls before it is judged removed — one flappy list
-        response must not delete the user's entities. Devices shared with
-        another config entry are left untouched.
+        The device registry — not ``self.data`` — is the source of truth
+        here: a device vanishing from the cloud list also vanishes from
+        ``self.data`` on the very next poll, so by the time this runs the
+        stale device is only visible in the registry. A device must be
+        absent from ``cloud_ids`` for ``_MISS_BEFORE_PRUNE`` consecutive
+        polls before it is judged removed, and devices shared with another
+        config entry are left untouched.
         """
-        if not self.data:
-            return
         registry = dr.async_get(self.hass)
         entry_id = self.config_entry.entry_id
-        removed: dict[str, str] = {}
-        for iot_id in list(self.data):
-            if iot_id in cloud_ids:
-                self._missing_counts.pop(iot_id, None)
+        for device_entry in list(
+            dr.async_entries_for_config(registry, entry_id)
+        ):
+            iot_id = next(
+                (
+                    value
+                    for domain, value in device_entry.identifiers
+                    if domain == DOMAIN
+                ),
+                None,
+            )
+            if iot_id is None or iot_id in cloud_ids:
+                self._missing_counts.pop(iot_id, None) if iot_id else None
                 continue
             misses = self._missing_counts.get(iot_id, 0) + 1
             self._missing_counts[iot_id] = misses
             if misses < self._MISS_BEFORE_PRUNE:
+                _LOGGER.debug(
+                    "设备 %s 未出现在云端列表（第 %d/%d 次）",
+                    device_entry.name or iot_id,
+                    misses,
+                    self._MISS_BEFORE_PRUNE,
+                )
                 continue
-            device_entry = registry.async_get_device(
-                identifiers={(DOMAIN, iot_id)}
-            )
-            if device_entry is not None and device_entry.config_entries - {
-                entry_id
-            }:
-                # Another integration still claims this hardware; not ours
-                # to delete.
+            if device_entry.config_entries - {entry_id}:
                 self._missing_counts.pop(iot_id, None)
                 _LOGGER.info(
                     "设备 %s 已从云端消失，但被其他配置项共用，保留",
-                    self.data[iot_id].name or iot_id,
+                    device_entry.name or iot_id,
                 )
                 continue
-            removed[iot_id] = self.data[iot_id].name or iot_id
-        if not removed:
-            return
-        for iot_id, name in removed.items():
             _LOGGER.info(
                 "设备 %s（%s）已从好太太账号移除，清理对应实体与设备",
-                name,
+                device_entry.name or iot_id,
                 iot_id,
             )
-            device_entry = registry.async_get_device(
-                identifiers={(DOMAIN, iot_id)}
-            )
-            if device_entry is not None:
-                registry.async_remove_device(device_entry.id)
+            registry.async_remove_device(device_entry.id)
             self._missing_counts.pop(iot_id, None)
             self.data.pop(iot_id, None)
 
@@ -651,11 +650,9 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
             self._adjust_poll_interval(devices)
             # 云端已经解绑/移除的设备：实体和设备不再有意义，主动清掉，
             # 否则会一直以不可用状态留在注册表里（issue：晾衣架移除后集成里还在）。
-            # 首次拉到空列表不算（登录刚开始或临时故障），必须有数据且确实少了才动手。
-            if devices:
-                self._async_prune_removed_devices(
-                    {d.iot_id for d in devices}
-                )
+            # 对比对象是注册表设备，不是 self.data——消失的设备下一轮就从
+            # data 里没了，只有注册表还记得它。连续缺失阈值防列表抖动误删。
+            self._async_prune_removed_devices({d.iot_id for d in devices})
             return {device.iot_id: device for device in devices}
         except HotataRateLimited as err:
             self.account.report_rate_limited()
