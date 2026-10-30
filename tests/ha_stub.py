@@ -222,6 +222,17 @@ dr = mod('homeassistant.helpers.device_registry')
 class DeviceInfo(dict):
     pass
 dr.DeviceInfo = DeviceInfo
+
+_REG = {}
+def _dr_async_get(hass):
+    return _DR_REGISTRY
+class _DRRegistry:
+    def async_get_device(self, identifiers=None):
+        return None
+    def async_remove_device(self, device_id):
+        pass
+_DR_REGISTRY = _DRRegistry()
+dr.async_get = _dr_async_get
 helpers.device_registry = dr
 
 event = mod('homeassistant.helpers.event')

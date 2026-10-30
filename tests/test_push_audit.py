@@ -987,6 +987,104 @@ def test_capped_lamp_is_not_created_and_stale_one_is_removed():
 
 
 
+
+def _prune_co(data, cloud_ids):
+    """Coordinator shell wired for _async_prune_removed_devices."""
+    co = cm.HotataCoordinator.__new__(cm.HotataCoordinator)
+    co.data = data
+    co._missing_counts = {}
+    co.hass = types.SimpleNamespace()
+    co.config_entry = types.SimpleNamespace(entry_id="entry-1")
+
+    removed = []
+    reg = types.SimpleNamespace()
+    reg.async_get_device = lambda identifiers=None: types.SimpleNamespace(
+        id=next(iter(identifiers))[1], config_entries={"entry-1"}
+    )
+    reg.async_remove_device = lambda device_id: removed.append(device_id)
+    co._reg = reg, removed
+
+    import hotata.coordinator as _cm
+    _cm.dr = types.SimpleNamespace(
+        async_get=lambda hass: reg,
+        async_get_device=reg.async_get_device,
+        async_remove_device=reg.async_remove_device,
+    )
+    return co, removed
+
+
+def _mkdev(iot_id, name="晾衣架"):
+    d = _dev({}, product_key="a1abYBCSVlV")
+    d.iot_id = iot_id
+    d.name = name
+    return d
+
+
+def test_removed_device_is_pruned_after_consecutive_misses():
+    """云端连续缺失达到阈值才清理；一次缺失不能删。"""
+    d1, d2 = _mkdev("keep"), _mkdev("gone", "旧晾衣架")
+    data = {"keep": d1, "gone": d2}
+    co, removed = _prune_co(data, {"keep", "gone"})
+
+    # 第 1 次：gone 消失，但未到阈值 → 不删
+    co._async_prune_removed_devices({"keep"})
+    R.check("one miss does not prune", removed, [])
+    R.check("one miss keeps the device in data", "gone" in data, True)
+
+    # 连续缺失到阈值前一次：仍不删
+    for _ in range(cm.HotataCoordinator._MISS_BEFORE_PRUNE - 2):
+        co._async_prune_removed_devices({"keep"})
+    R.check("still not pruned just below the threshold", removed, [])
+
+    # 达到阈值：删设备 + 从 data 移除
+    co._async_prune_removed_devices({"keep"})
+    R.check("pruned at the threshold", removed, ["gone"])
+    R.check("gone removed from data", "gone" in data, False)
+
+    # 之后不再重复删
+    co._async_prune_removed_devices({"keep"})
+    R.check("no repeat prune", removed, ["gone"])
+
+
+def test_reappearing_device_resets_the_counter():
+    """中间回来过一次 → 计数清零，重新计。"""
+    d = _mkdev("gone")
+    data = {"gone": d}
+    co, removed = _prune_co(data, set())
+    limit = cm.HotataCoordinator._MISS_BEFORE_PRUNE
+
+    for _ in range(limit - 1):
+        co._async_prune_removed_devices(set())
+    co._async_prune_removed_devices({"gone"})      # 回来了
+    R.check("counter cleared on return", co._missing_counts.get("gone"), None)
+
+    for _ in range(limit - 1):
+        co._async_prune_removed_devices(set())
+    R.check("not pruned before threshold again", removed, [])
+    co._async_prune_removed_devices(set())
+    R.check("pruned only after full misses again", removed, ["gone"])
+
+
+def test_shared_device_is_never_pruned():
+    """被其他配置项共用的设备不删。"""
+    d = _mkdev("shared")
+    data = {"shared": d}
+    co, removed = _prune_co(data, set())
+    # 让 registry 返回"还被别的 entry 用着"
+    import hotata.coordinator as _cm
+    reg2 = types.SimpleNamespace()
+    reg2.async_get_device = lambda identifiers=None: types.SimpleNamespace(
+        id="shared", config_entries={"entry-1", "entry-other"}
+    )
+    reg2.async_remove_device = lambda device_id: removed.append(device_id)
+    _cm.dr = types.SimpleNamespace(async_get=lambda hass: reg2)
+
+    for _ in range(cm.HotataCoordinator._MISS_BEFORE_PRUNE + 1):
+        co._async_prune_removed_devices(set())
+    R.check("shared device survives", removed, [])
+    R.check("shared device kept in data", "shared" in data, True)
+
+
 def main():
     test_incomplete_aepauth_never_logs_the_secret()
     test_incomplete_aepauth_never_logs_the_whole_payload()
@@ -1009,6 +1107,9 @@ def main():
     test_bind_success_restarts_the_watchdog_clock()
     test_unchanged_property_push_does_not_notify_entities()
     test_capped_lamp_is_not_created_and_stale_one_is_removed()
+    test_removed_device_is_pruned_after_consecutive_misses()
+    test_reappearing_device_resets_the_counter()
+    test_shared_device_is_never_pruned()
     test_property_comparison_ignores_timestamp_and_wrapping()
     test_motor_detection_accepts_wrapped_values()
     test_credential_without_identity_is_rejected()

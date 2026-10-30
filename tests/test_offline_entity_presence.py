@@ -28,6 +28,7 @@ Run from anywhere:  python3 tests/test_offline_entity_presence.py
 import asyncio
 import sys
 import types
+from types import MethodType
 from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -169,6 +170,13 @@ def make_coordinator(devices):
     co = HotataCoordinator.__new__(HotataCoordinator)
     co.hass = types.SimpleNamespace()
     co.entry = types.SimpleNamespace(data={})
+    co.config_entry = types.SimpleNamespace(entry_id="test-entry")
+    co._missing_counts = {}
+    co._MISS_BEFORE_PRUNE = HotataCoordinator._MISS_BEFORE_PRUNE
+    co._property_push_stale = MethodType(
+        HotataCoordinator._property_push_stale, co
+    )
+    co._last_property_push = 0.0
     co.account = account
     co.thing_models = {}
     co.runtimes = {}

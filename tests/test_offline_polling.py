@@ -23,6 +23,7 @@ Run from anywhere:  python3 tests/test_offline_polling.py
 import asyncio
 import sys
 import types
+from types import MethodType
 from datetime import timedelta
 from pathlib import Path
 
@@ -146,6 +147,13 @@ def make_coordinator(devices, online_map=None, fail_online=None, warm=False):
     co = HotataCoordinator.__new__(HotataCoordinator)
     co.hass = types.SimpleNamespace()
     co.entry = types.SimpleNamespace(data={})
+    co.config_entry = types.SimpleNamespace(entry_id="test-entry")
+    co._missing_counts = {}
+    co._MISS_BEFORE_PRUNE = HotataCoordinator._MISS_BEFORE_PRUNE
+    co._property_push_stale = MethodType(
+        HotataCoordinator._property_push_stale, co
+    )
+    co._last_property_push = 0.0
     co.account = account
     co.thing_models = {}
     co.runtimes = {}

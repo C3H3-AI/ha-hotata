@@ -25,6 +25,7 @@ from datetime import timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.helpers import device_registry as dr
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.storage import Store
@@ -151,6 +152,8 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
         #: 只由属性推送更新：状态/事件推送不能续命它，否则属性停了
         #: 看门狗仍会认为推送健康。
         self._last_property_push: float = 0.0
+        #: iot_id -> 连续未在云端设备列表中出现的轮询次数
+        self._missing_counts: dict[str, int] = {}
         self._push_starting = False
         self._last_push_retry = 0.0
 
@@ -481,6 +484,64 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
                     queue.append(child)
         return list(by_id.values())
 
+    #: 云端连续这么多次都没返回的设备才判为已移除（约 30 分钟），
+    #: 防止一次列表抖动就误删用户的实体与设备。
+    _MISS_BEFORE_PRUNE = 15
+
+    def _async_prune_removed_devices(self, cloud_ids: set[str]) -> None:
+        """Drop registry entries for devices the cloud no longer returns.
+
+        Entities die with the device, but the device entry itself (and any
+        area/name the user gave it) would linger forever without this. A
+        device must be missing from the cloud list ``_MISS_BEFORE_PRUNE``
+        consecutive polls before it is judged removed — one flappy list
+        response must not delete the user's entities. Devices shared with
+        another config entry are left untouched.
+        """
+        if not self.data:
+            return
+        registry = dr.async_get(self.hass)
+        entry_id = self.config_entry.entry_id
+        removed: dict[str, str] = {}
+        for iot_id in list(self.data):
+            if iot_id in cloud_ids:
+                self._missing_counts.pop(iot_id, None)
+                continue
+            misses = self._missing_counts.get(iot_id, 0) + 1
+            self._missing_counts[iot_id] = misses
+            if misses < self._MISS_BEFORE_PRUNE:
+                continue
+            device_entry = registry.async_get_device(
+                identifiers={(DOMAIN, iot_id)}
+            )
+            if device_entry is not None and device_entry.config_entries - {
+                entry_id
+            }:
+                # Another integration still claims this hardware; not ours
+                # to delete.
+                self._missing_counts.pop(iot_id, None)
+                _LOGGER.info(
+                    "设备 %s 已从云端消失，但被其他配置项共用，保留",
+                    self.data[iot_id].name or iot_id,
+                )
+                continue
+            removed[iot_id] = self.data[iot_id].name or iot_id
+        if not removed:
+            return
+        for iot_id, name in removed.items():
+            _LOGGER.info(
+                "设备 %s（%s）已从好太太账号移除，清理对应实体与设备",
+                name,
+                iot_id,
+            )
+            device_entry = registry.async_get_device(
+                identifiers={(DOMAIN, iot_id)}
+            )
+            if device_entry is not None:
+                registry.async_remove_device(device_entry.id)
+            self._missing_counts.pop(iot_id, None)
+            self.data.pop(iot_id, None)
+
     async def _async_update_data(self) -> dict[str, HotataDevice]:
         # 长连接未建立/已失效：按间隔重建（有存活客户端时交给 paho 自动重连）
         await self._async_rebuild_push_if_stale()
@@ -588,6 +649,13 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
             self.account.note_cloud_success()
             self.account.maybe_persist_primary_tokens()
             self._adjust_poll_interval(devices)
+            # 云端已经解绑/移除的设备：实体和设备不再有意义，主动清掉，
+            # 否则会一直以不可用状态留在注册表里（issue：晾衣架移除后集成里还在）。
+            # 首次拉到空列表不算（登录刚开始或临时故障），必须有数据且确实少了才动手。
+            if devices:
+                self._async_prune_removed_devices(
+                    {d.iot_id for d in devices}
+                )
             return {device.iot_id: device for device in devices}
         except HotataRateLimited as err:
             self.account.report_rate_limited()
