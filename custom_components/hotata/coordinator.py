@@ -26,6 +26,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.storage import Store
@@ -501,9 +502,14 @@ class HotataCoordinator(DataUpdateCoordinator[dict[str, HotataDevice]]):
         """
         registry = dr.async_get(self.hass)
         entry_id = self.config_entry.entry_id
-        for device_entry in list(
-            dr.async_entries_for_config(registry, entry_id)
-        ):
+        ent_registry = er.async_get(self.hass)
+        device_ids = {
+            e.device_id
+            for e in er.async_entries_for_config(ent_registry, entry_id)
+            if e.device_id
+        }
+        for device_id in sorted(device_ids):
+            device_entry = registry.async_get(device_id)
             iot_id = next(
                 (
                     value

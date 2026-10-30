@@ -1003,58 +1003,87 @@ def _mkdev(iot_id, name="晾衣架"):
     )
 
 
-def _prune_co(data, cloud_ids):
-    """Coordinator + fake registry wired for _async_prune_removed_devices.
+class _FakeRegistries:
+    """One object faking both registries with a coherent device graph.
 
-    The registry holds one device per iot_id; prune reads it through
-    dr.async_entries_for_config, so the fake must support that too.
+    devices: iot_id -> {name, shared_with_other_entry}
+    The prune code walks er (entity rows -> device_id) then dr
+    (device_id -> device entry). Keeping both in one place is what the
+    previous five SimpleNamespace rounds got wrong.
     """
+
+    def __init__(self, specs):
+        # specs: iot_id -> (name, shared: bool)
+        self._specs = specs
+        self.removed = []
+
+    # -- dr side --
+    def dr_async_get(self, hass):
+        return self
+
+    def async_get_device(self, device_id):
+        if device_id not in self._specs:
+            return None
+        name, _ = self._specs[device_id]
+        return types.SimpleNamespace(
+            id=device_id,
+            identifiers={("hotata", device_id)},
+            name=name,
+            config_entries=(
+                {"entry-1", "entry-other"}
+                if self._specs[device_id][1]
+                else {"entry-1"}
+            ),
+        )
+
+    def async_remove_device(self, device_id):
+        self.removed.append(device_id)
+        del self._specs[device_id]
+
+    def async_get(self, device_id):
+        """dr.async_get(hass) returns self; this is its device lookup."""
+        return self.async_get_device(device_id)
+
+    # -- er side --
+    def er_async_get(self, hass):
+        return self
+
+    def async_entries_for_config(self, registry, entry_id):
+        return [
+            types.SimpleNamespace(device_id=iot_id) for iot_id in self._specs
+        ]
+
+
+def _prune_co(specs):
+    """Build a coordinator wired to a coherent fake registry pair."""
+    fake = _FakeRegistries(specs)
     co = cm.HotataCoordinator.__new__(cm.HotataCoordinator)
-    co.data = dict(data)
+    co.data = {
+        iot_id: _mkdev(iot_id, name)
+        for iot_id, (name, _) in specs.items()
+    }
     co._missing_counts = {}
     co.hass = types.SimpleNamespace()
     co.config_entry = types.SimpleNamespace(entry_id="entry-1")
 
-    devices = {}
-    for iot_id, dev in data.items():
-        devices[iot_id] = types.SimpleNamespace(
-            id=iot_id,
-            identifiers={("hotata", iot_id)},
-            name=dev.name,
-            config_entries={"entry-1"},
-        )
-    removed = []
-
-    reg = types.SimpleNamespace()
-    reg._devices = devices
-    reg.async_get_device = lambda identifiers=None: devices.get(
-        next(iter(identifiers))[1]
+    cm.dr = types.SimpleNamespace(
+        async_get=fake.dr_async_get,
+        async_get_device=fake.async_get_device,
+        async_remove_device=fake.async_remove_device,
     )
-
-    def _remove(device_id):
-        removed.append(device_id)
-        devices.pop(device_id, None)
-
-    reg.async_remove_device = _remove
-    reg.async_entries_for_config = lambda registry, entry_id: list(
-        devices.values()
+    cm.er = types.SimpleNamespace(
+        async_get=fake.er_async_get,
+        async_entries_for_config=fake.async_entries_for_config,
     )
-
-    import hotata.coordinator as _cm
-    _cm.dr = types.SimpleNamespace(
-        async_get=lambda hass: reg,
-        async_get_device=reg.async_get_device,
-        async_remove_device=reg.async_remove_device,
-        async_entries_for_config=reg.async_entries_for_config,
-    )
-    return co, removed
+    return co, fake
 
 
 def test_removed_device_is_pruned_after_consecutive_misses():
     """云端连续缺失达到阈值才清理；一次缺失不能删。"""
-    d1, d2 = _mkdev("keep"), _mkdev("gone", "旧晾衣架")
-    data = {"keep": d1, "gone": d2}
-    co, removed = _prune_co(data, {"keep", "gone"})
+    co, fake = _prune_co(
+        {"keep": ("晾衣机", False), "gone": ("旧晾衣架", False)}
+    )
+    removed = fake.removed
 
     # 第 1 次：gone 消失，但未到阈值 → 不删
     co._async_prune_removed_devices({"keep"})
@@ -1070,6 +1099,7 @@ def test_removed_device_is_pruned_after_consecutive_misses():
     co._async_prune_removed_devices({"keep"})
     R.check("pruned at the threshold", removed, ["gone"])
     R.check("gone removed from coordinator data", "gone" in co.data, False)
+    R.check("gone removed from the registry", "gone" not in fake._specs, True)
 
     # 之后不再重复删
     co._async_prune_removed_devices({"keep"})
@@ -1078,9 +1108,8 @@ def test_removed_device_is_pruned_after_consecutive_misses():
 
 def test_reappearing_device_resets_the_counter():
     """中间回来过一次 → 计数清零，重新计。"""
-    d = _mkdev("gone")
-    data = {"gone": d}
-    co, removed = _prune_co(data, set())
+    co, fake = _prune_co({"gone": ("旧晾衣架", False)})
+    removed = fake.removed
     limit = cm.HotataCoordinator._MISS_BEFORE_PRUNE
 
     for _ in range(limit - 1):
@@ -1097,29 +1126,13 @@ def test_reappearing_device_resets_the_counter():
 
 def test_shared_device_is_never_pruned():
     """被其他配置项共用的设备不删。"""
-    d = _mkdev("shared")
-    data = {"shared": d}
-    co, removed = _prune_co(data, set())
-    # 让 registry 返回"还被别的 entry 用着"
-    import hotata.coordinator as _cm
-    shared_dev = types.SimpleNamespace(
-        id="shared",
-        identifiers={("hotata", "shared")},
-        name="共用晾衣架",
-        config_entries={"entry-1", "entry-other"},
-    )
-    reg2 = types.SimpleNamespace(
-        async_get=lambda hass: types.SimpleNamespace(),
-        async_get_device=lambda identifiers=None: shared_dev,
-        async_remove_device=lambda device_id: removed.append(device_id),
-        async_entries_for_config=lambda registry, entry_id: [shared_dev],
-    )
-    _cm.dr = reg2
-
-    for _ in range(cm.HotataCoordinator._MISS_BEFORE_PRUNE + 1):
+    co, fake = _prune_co({"shared": ("共用晾衣架", True)})
+    limit = cm.HotataCoordinator._MISS_BEFORE_PRUNE
+    for _ in range(limit + 1):
         co._async_prune_removed_devices(set())
-    R.check("shared device survives", removed, [])
+    R.check("shared device survives", fake.removed, [])
     R.check("shared device kept in data", "shared" in co.data, True)
+    R.check("shared device kept in the registry", "shared" in fake._specs, True)
 
 
 def main():
